@@ -1,0 +1,8 @@
+# The embedding server's Python dependencies. requirements.txt pins every package with its hashes
+# for linux/aarch64 and linux/x86_64; it is compiled in this directory with uv 0.7.2 by the command
+# its header records, which takes torch's CPU-only wheels from the PyTorch CPU index and every
+# other package from PyPI.
+torch==2.9.*
+transformers==4.56.2
+sentence-transformers==5.*
+huggingface_hub

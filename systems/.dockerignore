@@ -1,0 +1,9 @@
+# For an image built with systems/ as its context. Its Dockerfile COPYs the files it needs one by
+# one, never the whole directory, so an image holds no other system's directory; the tests and the
+# caches never enter the context at all.
+tests/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.DS_Store

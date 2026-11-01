@@ -1,5 +1,6 @@
-# The unit tests and the lint on every push to main and every pull request. The corpus tests need
-# the three full clones (ASOFBENCH_CLONES) and are skipped here; CONTRIBUTING.md says how to run them.
+# The unit tests, the tests of systems/ and the lint on every push to main and every pull request.
+# The corpus tests need the three full clones (ASOFBENCH_CLONES) and are skipped here;
+# CONTRIBUTING.md says how to run them.
 name: tests
 
 on:
@@ -27,4 +28,5 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install uv==0.7.2
       - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev pytest
-      - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev ruff check src tests examples
+      - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev pytest systems/tests
+      - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev ruff check src tests examples systems

@@ -66,6 +66,7 @@ only-include = [
     "labelling",
     "pyproject.toml",
     "src",
+    "systems",
     "tests",
     "uv.lock",
 ]

@@ -15,7 +15,7 @@ If you maintain one of the systems that v0.1 enters, you are invited to review i
 ```bash
 uv run --frozen --extra dev pytest
 ASOFBENCH_CLONES=../asofbench-clones uv run --frozen --extra dev pytest
-uv run --frozen --extra dev ruff check src tests examples
+uv run --frozen --extra dev ruff check src tests examples systems
 ```
 
 `--extra dev` installs the test tools (pytest, pytest-cov and ruff), and `--frozen` installs them as uv.lock pins them. The unit tests build small git repositories of their own; the corpus tests, marked `corpus`, need `ASOFBENCH_CLONES` set to the directory that holds the three clones, and are skipped without it. With the clones, the suite takes five to ten minutes, depending on the machine. In code comments and docstrings, "spec" means PREREGISTRATION.md, so "spec section 9" is its section 9.

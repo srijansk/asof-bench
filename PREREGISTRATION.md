@@ -1,6 +1,6 @@
 # asof-bench v0.1 pre-registration
 
-**Status: draft, not frozen.** This document becomes the registration when the annotated tag `prereg-v0.1.2` is created on the commit that copies the frozen manifest into section 15, together with labelling/GUIDELINES.md, every module in `src/asofbench` and the generated files the manifest lists. No system under test will have answered any question before that tag. Any change after the tag is recorded in [`DEVIATIONS.md`](DEVIATIONS.md) with its date and reason, and results are then reported both as registered and as amended.
+**Status: frozen.** This document is the registration. It was frozen on 2026-11-01 (UTC) by the annotated tag `prereg-v0.1.2`, created on the commit that adds this line, together with labelling/GUIDELINES.md, every module in `src/asofbench` and the generated files the manifest lists (section 15). No system under test had answered any question before that tag. Any change after the tag is recorded in [`DEVIATIONS.md`](DEVIATIONS.md) with its date and reason, and results are then reported both as registered and as amended.
 
 ## 1. The question
 
@@ -325,9 +325,9 @@ The manifest as frozen:
   },
   "generator": {
     "name": "asofbench",
-    "source_commit": "f1f0129310758ced2aae27f88c47ef46d24238f0",
+    "source_commit": "c9a3ac7ac43d28f9be3a4afc45897575a96f11e3",
     "source_dirty": false,
-    "source_sha256": "b174b70a561e93d493af240a3161600c7ef0889dc992be5e97e35344851049c1",
+    "source_sha256": "d7d147ab18393bedabe2981841e73ae4e8bf9f28bcedbeb6b2c3a3d079d4562a",
     "version": "0.1.0"
   },
   "graphiti_budget_basis": "claude-haiku-5-5 list prices on 2026-10-31 (Claude API, prompts up to 100,000 tokens): $0.10 per million input tokens, $0.50 per million output tokens",

@@ -9,6 +9,7 @@ import ipaddress
 import json
 import socket
 import socketserver
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -38,6 +39,94 @@ tmpfs /proc/kcore tmpfs rw,nosuid,size=65536k,mode=755 0 0
 tmpfs /sys/firmware tmpfs ro,relatime,size=4k,nr_inodes=1 0 0
 """
 ALLOWED = ["/input", "/output", "/run/secrets"]
+
+
+def word(address: str) -> str:
+    """An IPv4 address as /proc/net/route writes it: its four bytes read as one host-order word."""
+    return format(int.from_bytes(ipaddress.IPv4Address(address).packed, sys.byteorder), "08X")
+
+
+def route(iface: str, destination: str, gateway: str, flags: int, mask: str) -> str:
+    return (f"{iface}\t{word(destination)}\t{word(gateway)}\t{flags:04X}\t0\t0\t0\t{word(mask)}"
+            "\t0\t0\t0\n")
+
+
+ROUTE_HEADER = ("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow"
+                "\tIRTT\n")
+# A container's route tables as Docker gives them: on an internal network, one subnet and no
+# default route; on a network with a route out, a default route through the network's gateway.
+ROUTES_INNER = ROUTE_HEADER + route("eth0", "172.22.0.0", "0.0.0.0", 0x0001, "255.255.0.0")
+ROUTES_OUTER = (ROUTE_HEADER + route("eth0", "0.0.0.0", "172.23.0.1", 0x0003, "0.0.0.0")
+                + route("eth0", "172.23.0.0", "0.0.0.0", 0x0001, "255.255.0.0"))
+# /proc/net/ipv6_route with IPv6 on loopback only: ::1, and the two reject (unreachable) entries
+# that the kernel lists, which are no route; then a default route through fe80::1.
+NO_ROUTE_V6 = ("00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+               "00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo\n")
+IPV6_ROUTES_LO = (NO_ROUTE_V6 + "00000000000000000000000000000001 80 0000000000000000000000000000"
+                  "0000 00 00000000000000000000000000000000 00000000 00000004 00000000 80200001"
+                  "       lo\n" + NO_ROUTE_V6)
+IPV6_DEFAULT = ("00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+                "fe800000000000000000000000000001 00000400 00000001 00000000 00000003     eth0\n")
+# /proc/net/fib_trie and /proc/net/if_inet6 for a container whose address on its one network is
+# 172.22.0.2.
+FIB_TRIE = """\
+Main:
+  +-- 0.0.0.0/0 2 0 2
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+        |-- 127.255.255.255
+           /32 link BROADCAST
+     +-- 172.22.0.0/16 2 0 2
+        +-- 172.22.0.0/30 2 0 2
+           |-- 172.22.0.0
+              /16 link UNICAST
+           |-- 172.22.0.2
+              /32 host LOCAL
+        |-- 172.22.255.255
+           /32 link BROADCAST
+"""
+IF_INET6 = "00000000000000000000000000000001 01 80 10 80       lo\n"
+DOCKER_HOSTS = ("192.168.65.1", "192.168.65.254", "172.17.0.1")
+
+
+def test_route_tables_with_and_without_a_default_route():
+    inner, outer = netcheck.parse_routes(ROUTES_INNER), netcheck.parse_routes(ROUTES_OUTER)
+    assert [(r.iface, str(r.network), r.gateway) for r in inner] == [
+        ("eth0", "172.22.0.0/16", None)]
+    assert [(r.iface, str(r.network), r.gateway) for r in outer] == [
+        ("eth0", "0.0.0.0/0", "172.23.0.1"), ("eth0", "172.23.0.0/16", None)]
+    lo_only = netcheck.parse_ipv6_routes(IPV6_ROUTES_LO)
+    assert [(r.iface, str(r.network)) for r in lo_only] == [("lo", "::/0"), ("lo", "::1/128"),
+                                                            ("lo", "::/0")]
+    assert netcheck.check_routes(inner + lo_only).ok  # loopback's reject entries are no route
+    out = netcheck.check_routes(outer + lo_only)
+    assert not out.ok and "a default route out" in out.detail and "172.23.0.1" in out.detail
+    with_default = netcheck.parse_ipv6_routes(IPV6_ROUTES_LO + IPV6_DEFAULT)
+    out6 = netcheck.check_routes(inner + with_default)
+    assert not out6.ok and "a default route out" in out6.detail and "fe80::1" in out6.detail
+    with pytest.raises(ValueError):
+        netcheck.parse_routes(ROUTE_HEADER + "eth0\tnot-hex\n")
+
+
+def test_gateway_candidates_from_a_route_table():
+    assert netcheck.gateway_candidates(netcheck.parse_routes(ROUTES_INNER), DOCKER_HOSTS, []) == [
+        "172.22.0.1", *DOCKER_HOSTS]
+    outer = netcheck.parse_routes(ROUTES_OUTER)
+    assert netcheck.gateway_candidates(outer, DOCKER_HOSTS, ["10.9.9.9", "172.17.0.1"]) == [
+        "172.23.0.1", *DOCKER_HOSTS, "10.9.9.9"]
+    # Loopback and a host route give no candidate; a route through a gateway gives its next hop.
+    other = netcheck.parse_routes(ROUTE_HEADER + route("lo", "127.0.0.0", "0.0.0.0", 0x0001,
+                                                       "255.0.0.0")
+                                  + route("eth1", "10.1.2.3", "0.0.0.0", 0x0005,
+                                          "255.255.255.255")
+                                  + route("eth1", "10.8.0.0", "10.7.0.254", 0x0003,
+                                          "255.255.0.0"))
+    assert netcheck.gateway_candidates(other, (), []) == ["10.7.0.254"]
+    assert netcheck.local_addresses(FIB_TRIE, IF_INET6) == {"127.0.0.1", "172.22.0.2", "::1"}
 
 
 def test_parse_targets():
@@ -173,6 +262,24 @@ def test_the_dns_checks_name_each_host_once_and_skip_addresses(monkeypatch):
         ("dns", "embedder", True)]
 
 
+def test_the_gateway_probe_against_127_0_0_1():
+    closed = [closed_port()[1] for _ in range(3)]
+    with closing(socket.create_server(("127.0.0.1", 0))) as listener:
+        port = listener.getsockname()[1]
+        ports = sorted([*closed, port])
+        (found,), _ = netcheck.check_gateways(["127.0.0.1"], {}, ports, timeout=TIMEOUT,
+                                              concurrency=2)
+        assert not found.ok and found.detail == f"accepts on 127.0.0.1:{port}"
+        own = {"127.0.0.1": "the container's own address"}
+        (skipped,), _ = netcheck.check_gateways(["127.0.0.1"], own, ports, timeout=TIMEOUT,
+                                                concurrency=2)
+        assert skipped.ok and skipped.detail == "not probed: the container's own address"
+    (held,), seconds = netcheck.check_gateways(["127.0.0.1"], {}, ports, timeout=TIMEOUT,
+                                               concurrency=2)
+    assert held.ok and held.detail == "no TCP port of the 4 probed accepts (ECONNREFUSED 4)"
+    assert seconds >= 0
+
+
 def test_the_checks_that_connect():
     with stand_in(403) as proxy:
         assert netcheck.check_deny(proxy, ("github.com", 443), TIMEOUT).ok
@@ -190,18 +297,54 @@ def test_the_checks_that_connect():
     assert not netcheck.check_service(address, TIMEOUT).ok
 
 
+def kernel_files(tmp_path, monkeypatch, routes: str) -> None:
+    """Points netcheck at route tables and address lists written under ``tmp_path``, with no
+    Docker host address to probe, so that nothing outside this machine is reached."""
+    for constant, text in (("ROUTE_FILE", routes), ("IPV6_ROUTE_FILE", IPV6_ROUTES_LO),
+                           ("FIB_TRIE_FILE", FIB_TRIE), ("IF_INET6_FILE", IF_INET6)):
+        path = tmp_path / constant.lower()
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(netcheck, constant, path)
+    monkeypatch.setattr(netcheck, "DOCKER_HOST_ADDRESSES", ())
+
+
+def failures(out) -> list[tuple[str, str]]:
+    checks = json.loads(out.read_text(encoding="utf-8"))["checks"]
+    return [(check["kind"], check["target"]) for check in checks if not check["ok"]]
+
+
+def test_a_default_route_fails_the_gateway_check_without_a_scan(tmp_path, monkeypatch):
+    """With a route out the environment fails already, so no candidate is scanned through it, and
+    none passes unprobed."""
+    kernel_files(tmp_path, monkeypatch, ROUTES_OUTER)
+    monkeypatch.setattr(netcheck, "DOCKER_HOST_ADDRESSES", ("192.0.2.1",))
+    monkeypatch.setattr(socket, "getaddrinfo", resolver({}))
+
+    async def no_scan(*args, **kwargs):
+        raise AssertionError("the gateway scan ran")
+
+    monkeypatch.setattr(netcheck, "_scan", no_scan)
+    checks, seconds = netcheck.gateway_checks([], [], ("egress", 3128))
+    assert seconds is None
+    assert [(check.target, check.ok) for check in checks] == [
+        ("default route", False), ("172.23.0.1", False), ("192.0.2.1", False)]
+    assert all(check.detail.startswith("not probed: ") for check in checks[1:])
+
+
 def test_main_writes_the_report_and_exits_by_it(tmp_path, monkeypatch):
     mounts = tmp_path / "mounts"
     mounts.write_text(MOUNTS, encoding="utf-8")
     monkeypatch.setattr(netcheck, "MOUNTS_FILE", mounts)
     monkeypatch.setattr(socket, "getaddrinfo", resolver({}))
+    loopback = ROUTE_HEADER + route("lo", "127.0.0.0", "0.0.0.0", 0x0001, "255.0.0.0")
+    kernel_files(tmp_path, monkeypatch, loopback)
     out = tmp_path / "netcheck.json"
     host, closed = closed_port()
     with stand_in(403) as (proxy_host, proxy_port), listening() as (service_host, service_port):
         argv = ["--proxy", f"http://{proxy_host}:{proxy_port}",
                 "--deny", "github.com:443,pypi.org:443", "--deny", "peps.python.org:443",
                 "--direct", f"{host}:{closed}", "--services", f"{service_host}:{service_port}",
-                "--mounts", ",".join(ALLOWED), "--report", str(out)]
+                "--gateway", "127.0.0.1", "--mounts", ",".join(ALLOWED), "--report", str(out)]
         assert netcheck.main(argv) == 0
         written = json.loads(out.read_text(encoding="utf-8"))
         assert written["ok"] is True
@@ -210,12 +353,18 @@ def test_main_writes_the_report_and_exits_by_it(tmp_path, monkeypatch):
             ("deny", "peps.python.org:443", True), ("direct", f"{host}:{closed}", True),
             ("service", f"{service_host}:{service_port}", True), ("dns", "github.com", True),
             ("dns", "pypi.org", True), ("dns", "peps.python.org", True),
+            ("gateway", "default route", True), ("gateway", "127.0.0.1", True),
             ("mounts", str(mounts), True)]
+        assert written["checks"][9]["detail"] == "not probed: the container's own address"
         assert netcheck.main([*argv[:-4], "--mounts", "/input", "--report", str(out)]) == 1
         assert json.loads(out.read_text(encoding="utf-8"))["ok"] is False
         # The proxy refuses pypi.org, but a resolver that answers for it is a route out.
         monkeypatch.setattr(socket, "getaddrinfo", resolver({"pypi.org": "151.101.0.223"}))
         assert netcheck.main(argv) == 1
-        failed = [check for check in json.loads(out.read_text(encoding="utf-8"))["checks"]
-                  if not check["ok"]]
-        assert [(check["kind"], check["target"]) for check in failed] == [("dns", "pypi.org")]
+        assert failures(out) == [("dns", "pypi.org")]
+        # And so is a default route, whatever the proxy refuses.
+        monkeypatch.setattr(socket, "getaddrinfo", resolver({}))
+        kernel_files(tmp_path, monkeypatch,
+                     ROUTE_HEADER + route("lo", "0.0.0.0", "127.0.0.1", 0x0003, "0.0.0.0"))
+        assert netcheck.main(argv) == 1
+        assert failures(out) == [("gateway", "default route")]

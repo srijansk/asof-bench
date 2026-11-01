@@ -37,14 +37,19 @@ def tracked(pattern: str = "") -> list[str] | None:
 
 
 def markdown_files() -> list[Path]:
-    """The Markdown files git tracks, or, outside a checkout, every one under the root but the
-    tool directories."""
+    """The Markdown files git tracks, or, outside a checkout, every one under the root but those
+    in build directories or hidden ones other than .github."""
     names = tracked("*.md")
     if names is not None:
         return sorted(ROOT / name for name in names)
-    skip = {".git", ".venv", ".superpowers", ".ruff_cache", "build", "dist"}
     return sorted(path for path in ROOT.rglob("*.md")
-                  if not skip & set(path.relative_to(ROOT).parts))
+                  if not any(skipped(part) for part in path.relative_to(ROOT).parts[:-1]))
+
+
+def skipped(part: str) -> bool:
+    """Whether a directory holds no document of the repository: a build or hidden one, .github
+    apart."""
+    return part in ("build", "dist") or (part.startswith(".") and part != ".github")
 
 
 def prose_lines(text: str) -> list[tuple[int, str]]:

@@ -123,13 +123,13 @@ REPORT.md is the build report: the pins, the items by family, stratum and corpus
 | `pins` | the pinned commit of each repository |
 | `snapshot` | S |
 | `seed` | the selection seed |
-| `files` | the size in bytes, line count and SHA-256 of every generated file |
+| `files` | the size in bytes, line count and SHA-256 of every generated file, with the record count of each JSONL file (`records`) and the item count of pilot.json (`items`) |
 | `items` | the total of items |
 | `item_counts` | the items of each family, stratum and corpus |
 | `eligible_pools` | the eligible pool of each family, stratum and corpus |
 | `labelling_pairs` | the mention pairs per corpus |
 | `streams` | for each arm's stream, its episode count, characters, estimated tokens and SHA-256, and under `sidecars` the size and SHA-256 of each file beside it |
-| `generator` | the generator's version, the SHA-256 over its source files (`source_sha256`), `source_commit` and `source_dirty` |
+| `generator` | the generator's `name` and version, the SHA-256 over its source files (`source_sha256`), `source_commit` and `source_dirty` |
 | `graphiti_budget_usd` | the Graphiti budget of M0, in US dollars |
 | `graphiti_budget_basis` | the price basis the budget was set at |
 | `canary` | the canary string |

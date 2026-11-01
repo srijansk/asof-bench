@@ -2,7 +2,7 @@
 
 What a system receives, the environment it runs in, the answer rows it writes, and who the entrants are. [PREREGISTRATION.md](../PREREGISTRATION.md) registers every rule this page describes, and is the rule wherever the two seem to differ.
 
-## Entering a system
+## What a system receives and how it runs
 
 What a system may see is fixed by sections 8 and 11 of the registration ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)). In short:
 

@@ -6,4 +6,12 @@
 uv run python examples/toy_world.py ../asofbench-toy
 ```
 
-It takes about two seconds and prints where it wrote each part. Replace the constant answers with your system's to check your answer rows, your entries file and the scorer's report before any real run. The registration forbids a configuration to answer a v0.1 item before the commit that fixes it ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)): develop here, never on data/v0.1. None of the toy items is a v0.1 item, and a toy run's results say nothing about v0.1. [docs/entering-a-system.md](../docs/entering-a-system.md) has the rules a real entry follows, and [docs/data-format.md](../docs/data-format.md) the format of every file.
+It takes about two seconds and prints where it wrote each part. To score the same rows again as a shell command, as an outside entry:
+
+```bash
+uv run asofbench score --data ../asofbench-toy/toy-data --answers ../asofbench-toy/answers.jsonl \
+    --entries ../asofbench-toy/entries.json --out ../asofbench-toy/results-again \
+    --answering-model toy-model --answering-settings "toy settings" --construction-model none --embedding-model none
+```
+
+Replace the constant answers with your system's to check your answer rows, your entries file and the scorer's report before any real run. The registration forbids a configuration to answer a v0.1 item before the commit that fixes it ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)): develop here, never on data/v0.1. None of the toy items is a v0.1 item, and a toy run's results say nothing about v0.1. [docs/entering-a-system.md](../docs/entering-a-system.md) has the rules a real entry follows, and [docs/data-format.md](../docs/data-format.md) the format of every file.

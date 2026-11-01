@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 authors = [
     { name = "Srijan Saket" },
 ]
-keywords = ["benchmark", "knowledge-graphs", "temporal", "agent-memory", "evaluation", "rag"]
+keywords = ["benchmark", "llm-evaluation", "agent-memory", "rag", "knowledge-graph", "temporal-reasoning", "long-context", "preregistration"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Science/Research",

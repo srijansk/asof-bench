@@ -1,6 +1,6 @@
 # Data and licences
 
-[PREREGISTRATION.md](../PREREGISTRATION.md) registers every rule this page describes, and is the rule wherever the two seem to differ.
+Which licence covers the code, the documents, the data and the published results, and the terms of the three source repositories, whose text the locally rebuilt streams and trees hold. [PREREGISTRATION.md](../PREREGISTRATION.md) registers every rule this page describes, and is the rule wherever the two seem to differ.
 
 The code (generator, stream builder, materialiser, scorer and tests) is released under the MIT licence; see [LICENSE](../LICENSE). The documents (the README, the pages of docs/, PREREGISTRATION.md, labelling/GUIDELINES.md and the other Markdown files of this repository outside data/v0.1) are covered by the same licence, as the software's associated documentation files; data/v0.1/REPORT.md, the build report, is one of the data files below.
 

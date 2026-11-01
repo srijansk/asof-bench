@@ -1,0 +1,3 @@
+# The registered data files are checked byte for byte against the SHA-256 values in their manifest, and the manifest's source digest hashes the working-tree bytes of the generator's modules, so git never converts the line endings of either.
+data/v0.1/** -text
+src/asofbench/*.py -text

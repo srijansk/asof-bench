@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asofbench"
+version = "0.1.0"
+description = "A pre-registered benchmark that asks what a project had decided as of a given date, with gold taken from the git history of public decision records."
+readme = "README.md"
+# The code and documents are MIT; data/v0.1, which the source distribution ships, is CC0 1.0.
+license = "MIT AND CC0-1.0"
+license-files = ["LICENSE", "LICENSE-DATA"]
+requires-python = ">=3.11"
+authors = [
+    { name = "Srijan Saket" },
+]
+keywords = ["benchmark", "knowledge-graphs", "temporal", "agent-memory", "evaluation", "rag"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# The gold generator and scorer are stdlib-only on purpose: anyone auditing the
+# benchmark can read every line that decides a label.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/srijansk/asof-bench"
+Source = "https://github.com/srijansk/asof-bench"
+Issues = "https://github.com/srijansk/asof-bench/issues"
+
+[project.scripts]
+asofbench = "asofbench.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asofbench"]
+
+# The source distribution holds the repository's tracked top-level files and directories only, so
+# that a build from a working checkout cannot ship an untracked file or directory beside them.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    "CITATION.cff",
+    "CONTRIBUTING.md",
+    "DEVIATIONS.md",
+    "LICENSE",
+    "LICENSE-DATA",
+    "PREREGISTRATION.md",
+    "README.md",
+    "data",
+    "labelling",
+    "pyproject.toml",
+    "src",
+    "tests",
+    "uv.lock",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = [
+    "corpus: needs the pinned corpus clones (set ASOFBENCH_CLONES)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

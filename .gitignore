@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+# Corpus clones and built revision streams are regenerated from pinned commits, never committed.
+/cache/
+/streams/
+# The annotators' sheets hold proposal text: they stay local (asofbench labelling-sheet).
+labelling-sheet*.md
+.DS_Store
+# A local choice of interpreter: requires-python (3.11 or later) and uv.lock say what the project needs.
+.python-version
+# Local secrets, such as the model API keys an adapter reads: never committed.
+.env
+.env.*

@@ -1,6 +1,6 @@
 # asof-bench v0.1 pre-registration
 
-**Status: draft, not frozen.** This document becomes the registration when the annotated tag `prereg-v0.1.1` is created on the commit that copies the frozen manifest into section 15, together with labelling/GUIDELINES.md, every module in `src/asofbench` and the generated files the manifest lists. No system under test will have answered any question before that tag. Any change after the tag is recorded in [`DEVIATIONS.md`](DEVIATIONS.md) with its date and reason, and results are then reported both as registered and as amended.
+**Status: frozen.** This document is the registration. It was frozen by the annotated tag `prereg-v0.1.1`, created on the commit that adds this line, together with labelling/GUIDELINES.md, every module in `src/asofbench` and the generated files the manifest lists (section 15). No system under test had answered any question before that tag. Any change after the tag is recorded in [`DEVIATIONS.md`](DEVIATIONS.md) with its date and reason, and results are then reported both as registered and as amended.
 
 ## 1. The question
 
@@ -263,7 +263,7 @@ The manifest as frozen:
   "eligible_pools": {
     "CF/counterfactual/eth": 49,
     "CF/counterfactual/pep": 50,
-    "F1/change/eth": 820,
+    "F1/change/eth": 477,
     "F1/change/pep": 635,
     "F1/current/eth": 826,
     "F1/current/pep": 744,
@@ -282,15 +282,21 @@ The manifest as frozen:
   },
   "files": {
     "REPORT.md": {
-      "bytes": 12975,
-      "lines": 361,
-      "sha256": "648d32e416426aa3ee445bbdbc15304ff334e23eec6f8134694b3eaf50c2ab1f"
+      "bytes": 17682,
+      "lines": 413,
+      "sha256": "8d58e8741c615a50067a666e87e05cd955fae7cd2ff2101d46dfb2f5342251f6"
+    },
+    "edges.jsonl": {
+      "bytes": 387307,
+      "lines": 1885,
+      "records": 1885,
+      "sha256": "fe611182581b54a7751a82e6789e73b8e36c2975bb2336f34d59fa479ff7fb55"
     },
     "gold.jsonl": {
-      "bytes": 520196,
+      "bytes": 557726,
       "lines": 905,
       "records": 905,
-      "sha256": "e57617a3a8b62b5f5fc41ccfdd58abd905e35a215aff414b723459604ee208c9"
+      "sha256": "fe497dd7fca89cd39e1afa6e2f56fb84554747d996a6d692d5a14e815f01da3a"
     },
     "labelling/mention_pairs.jsonl": {
       "bytes": 150146,
@@ -299,16 +305,16 @@ The manifest as frozen:
       "sha256": "87ec5c71ed1e40d88bf830efb9b74b144724b8d19b9eba082e59fa10831702c0"
     },
     "pilot.json": {
-      "bytes": 13074,
+      "bytes": 13076,
       "items": 180,
       "lines": 1,
-      "sha256": "782b1ddd1ef9c7a59d745cb16dde6b378af0fcaf157e1896bc71cd52bb63dff8"
+      "sha256": "0e7f02beef3dbb0f5bcf79ea8aeed302ad347d15c88a9b7e23ed222065a42514"
     },
     "questions.jsonl": {
-      "bytes": 583095,
+      "bytes": 583860,
       "lines": 905,
       "records": 905,
-      "sha256": "17c583dc87bce4453f0b003c0d71a3c12ec79fefee0e323b260979f05f44644a"
+      "sha256": "62b1ba39179be4890c2222e25628273a84722aa7f5218151502bc336e52b0d4c"
     },
     "timelines.jsonl": {
       "bytes": 1298579,
@@ -319,13 +325,13 @@ The manifest as frozen:
   },
   "generator": {
     "name": "asofbench",
-    "source_commit": "1838410216bf48679ead6ef95f1fa541c4c4a91c",
+    "source_commit": "f1f0129310758ced2aae27f88c47ef46d24238f0",
     "source_dirty": false,
-    "source_sha256": "d0dc63d47738cd099b909a89e511d9b6dea179f5e71a0ea349cb11179545ae72",
+    "source_sha256": "b174b70a561e93d493af240a3161600c7ef0889dc992be5e97e35344851049c1",
     "version": "0.1.0"
   },
-  "graphiti_budget_basis": "claude-haiku-5-5 list prices on 2026-10-30 (Claude API, prompts up to 100,000 tokens): $0.10 per million input tokens, $0.50 per million output tokens",
-  "graphiti_budget_usd": 250.0,
+  "graphiti_budget_basis": "claude-haiku-5-5 list prices on 2026-10-31 (Claude API, prompts up to 100,000 tokens): $0.10 per million input tokens, $0.50 per million output tokens",
+  "graphiti_budget_usd": 500.0,
   "item_counts": {
     "CF/counterfactual/eth": 15,
     "CF/counterfactual/pep": 15,
@@ -361,18 +367,44 @@ The manifest as frozen:
       "chars": 97964438,
       "episodes": 26486,
       "sha256": "a2d1608525933d6d56e4fa14c7598651e08c5852db9a249ef3470d7fa1c2c94e",
+      "sidecars": {
+        "cf_messages.json": {
+          "bytes": 504,
+          "sha256": "54fff4aacb5a0b4f2e7bcd7be8ba2925ce3c5adc64ec5d1fc560455c1eab9f67"
+        },
+        "stats.json": {
+          "bytes": 134,
+          "sha256": "1bfe071ffd59164dac90d849b726897c7800d52adbcc370a81d939c777dcdcb9"
+        }
+      },
       "tokens_est": 24491109
     },
     "H+": {
       "chars": 97964116,
       "episodes": 26486,
       "sha256": "39b94de8adb5059268c0d615eb67fd155198eede8e4268c36a53b979941c75f0",
+      "sidecars": {
+        "stats.json": {
+          "bytes": 134,
+          "sha256": "ada126bba899516a3cd435079c9123c669078ae8f76b56b7a4ae8188675a97b2"
+        }
+      },
       "tokens_est": 24491029
     },
     "H-": {
       "chars": 96972538,
       "episodes": 26486,
       "sha256": "b99d4b8bf23aa6afb2393f3a747c20805015db8c75ce092e9b5e4b30f91ecb4c",
+      "sidecars": {
+        "message_cues.json": {
+          "bytes": 118976,
+          "sha256": "2a1a25ef7f4214d0550cbd9e0847fcf1a365a75ddb84ee082318c5851b7bc077"
+        },
+        "stats.json": {
+          "bytes": 134,
+          "sha256": "c63e28009bf49cf56e54a11eb8fc9b4c0d6a4b04ca851ae27a982c476815e8d6"
+        }
+      },
       "tokens_est": 24243134
     }
   }

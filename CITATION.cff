@@ -2,7 +2,10 @@ cff-version: 1.2.0
 message: If you use asof-bench, please cite it as below.
 title: "asof-bench: what did a project decide, as of date D?"
 type: dataset
-version: 0.1.0
+version: prereg-v0.1.1
+date-released: 2026-10-31
+# The commit whose code built data/v0.1 (its manifest's source_commit); the tagged commit, prereg-v0.1.1, follows it.
+commit: f1f0129310758ced2aae27f88c47ef46d24238f0
 authors:
   - family-names: Saket
     given-names: Srijan

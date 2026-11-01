@@ -2,7 +2,7 @@
 
 **What did a project decide, as of a given date?** asof-bench is a [pre-registered](#status-and-roadmap) benchmark for the memory and retrieval systems that give language-model agents their context.
 
-[![tests](https://github.com/srijansk/asof-bench/actions/workflows/tests.yml/badge.svg)](https://github.com/srijansk/asof-bench/actions/workflows/tests.yml) [![code: MIT](https://img.shields.io/badge/code-MIT-blue)](LICENSE) [![data: CC0 1.0](https://img.shields.io/badge/data-CC0%201.0-blue)](LICENSE-DATA) [![python: 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml) [![pre-registered: prereg-v0.1.2](https://img.shields.io/badge/pre--registered-prereg--v0.1.2-green)](PREREGISTRATION.md)
+[![tests](https://github.com/srijansk/asof-bench/actions/workflows/tests.yml/badge.svg)](https://github.com/srijansk/asof-bench/actions/workflows/tests.yml) [![code: MIT](https://img.shields.io/badge/code-MIT-blue)](LICENSE) [![data: CC0 1.0](https://img.shields.io/badge/data-CC0%201.0-blue)](LICENSE-DATA) [![python: 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml) [![pre-registered: prereg-v0.1.2](https://img.shields.io/badge/pre--registered-prereg--v0.1.2-green)](PREREGISTRATION.md) [![Software Heritage](https://archive.softwareheritage.org/badge/swh:1:rel:aaa66b41004c349e2cb99a57c76b045e5da1ed5a/)](https://archive.softwareheritage.org/swh:1:rel:aaa66b41004c349e2cb99a57c76b045e5da1ed5a;origin=https://github.com/srijansk/asof-bench)
 
 [Registration](PREREGISTRATION.md) · [Data](data/) · [Results: not yet](#status-and-roadmap) · [Documentation](#documentation) · [Citation](#citation)
 
@@ -95,7 +95,7 @@ A benchmark's result depends on choices: which items count, which baseline, whic
 Next, in order ([section 13](PREREGISTRATION.md#13-gates)):
 
 1. The registered systems' adapters and configurations are committed here before any of them answers a question, and their maintainers are invited to review them.
-2. M0, the Graphiti cost pilot: Graphiti ingests 50 PEPs, and its measured cost projects whether all its ingestion fits the budget of 500 US dollars; if not, it is entered as `graphiti-reduced`, on part of each stream.
+2. M0, the Graphiti cost pilot: Graphiti ingests 50 PEPs, and its measured cost projects whether all its ingestion fits the US$500 budget; if not, it is entered as `graphiti-reduced`, on part of each stream.
 3. M1, the pilot: 180 items, three runs each, answered by six systems: closed book, BM25, grep at D, long context, HippoRAG 2 and Graphiti (dense, hybrid and `ppr` are not piloted). Its gates stop the comparison if every one of them scores 85% or more on the pilot's headline items, if both graph-memory systems fail present-day questions about as often as past ones, or if grep at D and long context answer them and Graphiti does not differ significantly from the better of the two. If no two of the five other than closed book differ by 15 points or more with a Holm-adjusted McNemar p below 0.05, the null is reported and only section 14's measurements go ahead.
 4. The full runs, and the results report. No date is set for any step.
 
@@ -142,7 +142,7 @@ Open an issue at https://github.com/srijansk/asof-bench/issues. For a suspected 
 
 ### Competing interests
 
-The benchmark's author develops and promotes [crewlore](https://github.com/srijansk/crewlore) outside this benchmark, so crewlore is not entered: a result for it would be a result for the author's own project. Nor is any system built on another, unpublished benchmark the author co-wrote. The Personalized PageRank retriever (`ppr`) is the author's too, but it is written for this benchmark as a reference implementation of a published pattern, is in this repository before any scored run, and every table of the results report labels it as the author's own ([section 11](PREREGISTRATION.md#11-systems-model-and-runs)).
+The benchmark's author develops and promotes [crewlore](https://github.com/srijansk/crewlore) outside this benchmark, so crewlore is not entered: a result for it would be a result for the author's own project. Systems developed using an unpublished benchmark the author co-wrote are not entered either. The Personalized PageRank retriever (`ppr`) is the author's too, but it is written for this benchmark as a reference implementation of a published pattern, is in this repository before any scored run, and every table of the results report labels it as the author's own ([section 11](PREREGISTRATION.md#11-systems-model-and-runs)).
 
 The author works at a company that builds software that gives AI agents an organisation's knowledge. The company has no role in this benchmark: none of its systems is entered, it funds no part of the work, and it has no say in the design or the results. The author holds the rights in this work; the company claims none.
 

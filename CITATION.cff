@@ -5,6 +5,10 @@ type: dataset
 version: prereg-v0.1.2
 commit: d014f3fdf07a81356cf104889abe51812cc3cbe8
 date-released: 2026-11-01
+identifiers:
+  - type: swh
+    value: "swh:1:rel:aaa66b41004c349e2cb99a57c76b045e5da1ed5a"
+    description: "The tag prereg-v0.1.2, archived by Software Heritage on 2026-11-01."
 authors:
   - family-names: Saket
     given-names: Srijan

@@ -393,11 +393,13 @@ FAMILY_ORDER = ("F1", "F2", "F3", "F4", "F5", "CF")  # section 7's order
 
 
 # Words that the headline's documents must not use: the family of the comparisons a run makes,
-# which the fixed family replaced, and any claim that an adjusted p is the same whatever systems a
-# run holds, which Holm's step-down does not give (only that leaving systems out never lowers it).
+# which the fixed family replaced; any claim that an adjusted p is the same whatever systems a run
+# holds, which Holm's step-down does not give (only that leaving systems out never lowers it); and
+# an entries file of the registered full run as one that only declares outside entries, a rule the
+# scorer does not apply (it asks that the file narrow no registered system, scoring._narrowed).
 STALE_HEADLINE_WORDS = ("over every comparison the run makes",
                         "Holm-adjusted over every comparison", "whichever systems",
-                        "the same adjusted p", "invariant")
+                        "the same adjusted p", "invariant", "only declares outside entries")
 
 
 def headline_rule_gaps(registration: str, readme: str) -> list[str]:
@@ -406,8 +408,8 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
     ``HEADLINE_FAMILY`` comparisons, a comparison not made counting as p = 1, with what that
     guarantees (leaving systems out never lowers a remaining adjusted p); each reading's own Holm
     family; a comparison made only where both sides have a scored answer; and the registered full
-    run, whose rows alone carry a claim, which uses the registered entries (an entries file that
-    only declares outside entries, or none) and needs grep at D and each compared system to answer
+    run, whose rows alone carry a claim, which uses the registered entries (no entries file, or
+    one that narrows no registered system) and needs grep at D and each compared system to answer
     every compared item in runs 1, 2 and 3, each unmet condition named, as the scorer words it, in
     section 12 and the README's examples. Also where any of them still uses the old family or
     claims invariance (``STALE_HEADLINE_WORDS``), and where section 12's default entries leave out
@@ -438,7 +440,7 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
                         "headline's",
                         "both have at least one scored answer", "Only its rows carry a `claim`",
                         "when it uses the registered entries, with no entries file or with one "
-                        "that only declares outside entries",
+                        "that narrows no registered system",
                         f"have a scored answer, as above, to every H{chr(0x2212)} F1-change "
                         "item of both corpora in runs 1, 2 and 3", "before the headline's table",
                         *examples)),
@@ -446,9 +448,15 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
                        "a comparison the run does not make counts as p = 1", never_lowers,
                        f"each Holm-adjusted on its own over the {family}",
                        "both have at least one scored answer", "Only its rows carry `claim`",
-                       "with the registered entries, that makes all 14 comparisons", complete,
+                       "with the registered entries (the arms and families each system is "
+                       "entered in when no entries file narrows them; [Scoring](#scoring)), that "
+                       "makes all 14 comparisons", complete,
+                       "it uses the registered entries (no entries file, or one that narrows no "
+                       "registered system), it makes all 14 headline comparisons",
+                       "A run whose entries file narrows a registered system is not the registered "
+                       "full run, and one whose file narrows no registered system can be",
                        "its entries are the registered ones, with no entries file or one that "
-                       "only declares outside entries",
+                       "narrows no registered system",
                        "have a scored answer to every H- F1-change item of both corpora in runs "
                        "1, 2 and 3", "its reasons in its opening paragraph, before the table",
                        *examples)),

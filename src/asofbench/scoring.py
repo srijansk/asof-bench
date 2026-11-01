@@ -102,7 +102,7 @@ otherwise shows no detectable difference: the verdict follows the majority resul
 compares, and a visible line says when the accuracy averaged over the runs differs the other way,
 or not at all. The verdict is a ``claim`` only in the registered full run, which scores every item
 (no ``--items``) of the registered build with the registered entries (no entries file, or one
-that only declares outside entries), makes all 14 comparisons with grep at D and each compared
+that narrows no registered system), makes all 14 comparisons with grep at D and each compared
 system answering every compared item in runs 1, 2 and 3, and is answered by the registered
 answering model with the registered settings over stores the registered construction model
 built, with text the registered embedding model embedded; any other run gives its comparisons as
@@ -1924,8 +1924,10 @@ def _narrowed(scope: Scope) -> list[dict]:
     """Each registered system (section 11) that the entries file enters in fewer arms or families
     than its registered entries (``Scope.entry`` without the file), with the arms and the
     families it narrows it to (None for whichever it leaves as registered). The registered full
-    run uses the registered entries (section 12): an entries file that only declares outside
-    entries keeps it, and one that narrows any registered system does not."""
+    run uses the registered entries (section 12): no entries file, or one that narrows no
+    registered system. An entries file can only narrow and holds only arms and families, so a
+    registered system it declares with its registered entries is entered as registered, and an
+    outside entry never counts."""
     found = []
     for system in sorted(scope.declared):
         if system not in REGISTERED_SYSTEMS:
@@ -2309,7 +2311,7 @@ def _not_made_lines(report: dict, not_made: list[dict]) -> list[str]:
 
 REGISTERED_RUN = ("scores every item (no --items) of the registered build (data/v0.1's "
                   "questions.jsonl, gold.jsonl and pilot.json) with the registered entries (no "
-                  "entries file, or one that only declares outside entries), makes all "
+                  "entries file, or one that narrows no registered system), makes all "
                   f"{HEADLINE_FAMILY} registered comparisons, grep at D and each compared system "
                   "having a scored answer to every H- F1-change item of each corpus in runs "
                   f"{_listed_words(list(RUNS))}, and is answered by "

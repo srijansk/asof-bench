@@ -4312,11 +4312,13 @@ def test_the_registered_full_run_needs_every_run_of_both_sides(tmp_path, registe
 
 def test_the_registered_full_run_uses_the_registered_entries(tmp_path, registered):
     """Section 12: the registered full run uses the registered entries: no entries file, or one
-    that only declares outside entries (systems section 11 does not name), whatever it enters
-    them in, or that declares a registered system with its registered entries. An entries file
-    that narrows any registered system's arms or families, one the headline does not compare
-    included, makes the run not the registered full run, with a reason that names the system and
-    what it narrows it to; the comparisons are still made, as readings."""
+    that narrows no registered system. An entries file can only narrow and holds only arms and
+    families, so one that declares a registered system with its registered entries enters it as
+    registered, and its outside entries (systems section 11 does not name), whatever they are
+    entered in, never count; the registered opening says so in each case. An entries file that
+    narrows any registered system's arms or families, one the headline does not compare included,
+    makes the run not the registered full run, with a reason that names the system and what it
+    narrows it to; the comparisons are still made, as readings."""
     data, ids = headline_data(tmp_path)
     with (data / "questions.jsonl").open("a", encoding="utf-8") as f:  # a second family, F2
         f.write(dumps(question("F2-positive-PEP-5-2026-10-27", "F2", "positive", "pep", "set",
@@ -4340,8 +4342,10 @@ def test_the_registered_full_run_uses_the_registered_entries(tmp_path, registere
     ):
         headline, out = entered(name, entries)
         assert (headline["registered"], headline["not_registered"]) == (True, []), name
-        assert ("with the registered entries (no entries file, or one that only declares outside "
-                "entries)") in headline_intro(out), name
+        # The opening's words fit each case, the file that declares registered systems included.
+        assert ("with the registered entries (no entries file, or one that narrows no registered "
+                "system)") in headline_intro(out), name
+        assert "only declares outside entries" not in headline_intro(out), name
     narrows = {
         "closed-book": ({"closed-book": {"arms": ["H-"]}},
                         ["the entries file narrows closed-book to the arm H-"]),

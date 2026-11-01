@@ -249,7 +249,7 @@ LEGACY_REASONS = (
     "| Incomplete | Draft | Read from 20 PEPs under section 4's first-occurrence rule, PEP 1's own "
     "first header among them, for PEPs whose text was not finished, so no decision had been taken: "
     "first in 2000, last given to a new PEP in 2003 (PEP 320), and held by PEPs 205 and 226 until "
-    "2007. PEP 230's first header, and each of its headers to 2006, also carries a later `Status: "
+    "2007. PEP 230's first six headers (2000-11-28 to 2006-03-23) also carry a later `Status: "
     "Incomplete` line after `Status: Draft`, which is not read |",
     "| Draught | Draft | A misspelling the table maps; no PEP file records it in any version |",
     "| Approved | Accepted | A variant, recorded in one version each of PEP 311 (2003) and PEP 411 "
@@ -277,9 +277,9 @@ def test_section_5_states_the_history_of_the_legacy_pep_values(corpus, clones):
     """Section 5's reasons for the PEP legacy table, as the pinned history records each value:
     Incomplete read from 20 PEPs from 2000, PEP 1's first header among them, last given to a new
     PEP in 2003 (PEP 320) and given up last by PEPs 205 and 226, in 2007, and carried, unread, by
-    PEP 230's headers from its first to 2006 after a first status line Draft; Draught in no
-    version; the other values in the PEPs and years the table names. The table's rows state
-    exactly these facts."""
+    PEP 230's first six headers (2000-11-28 to 2006-03-23) after a first status line Draft;
+    Draught in no version; the other values in the PEPs and years the table names. The table's
+    rows state exactly these facts."""
     found = legacy_records(corpus)
     assert "draught" not in found
     assert {key: {n: (min(y), max(y)) for n, y in peps.items()} for key, peps in found.items()
@@ -302,14 +302,16 @@ def test_section_5_states_the_history_of_the_legacy_pep_values(corpus, clones):
     assert (sorted(latest), {time.gmtime(given_up(n)).tm_year for n in latest}) == ([205, 226],
                                                                                  {2007})
     assert all(given_up(n) < given_up(latest[0]) for n in incomplete if n not in latest)
-    # The 21st file: from its first version to 2006, PEP 230's header has a later Status line,
-    # Incomplete, after Status: Draft. Section 4 reads a repeated key's first occurrence, so those
-    # versions record Draft and PEP 230 is not one of the 20; no later version has the line.
+    # The 21st file: in its first six versions, 2000-11-28 to 2006-03-23, PEP 230's header has a
+    # later Status line, Incomplete, after Status: Draft. Section 4 reads a repeated key's first
+    # occurrence, so those versions record Draft and PEP 230 is not one of the 20; no later version
+    # has the line.
     versions = [v for v in corpus.proposals["PEP-230"].versions if v.blob is not None]
     twice = [v for v in versions if status_lines(clones, v.blob) == ["Draft", "Incomplete"]]
     assert 230 not in incomplete and twice and twice == versions[:len(twice)]  # from the first on
     assert [v.raw_status for v in twice] == ["Draft"] * len(twice)
-    assert {time.gmtime(v.recorded_ts).tm_year for v in twice} == {2000, 2006}
+    assert len(twice) == 6 and [time.strftime("%Y-%m-%d", time.gmtime(v.recorded_ts))
+                                for v in (twice[0], twice[-1])] == ["2000-11-28", "2006-03-23"]
     later = versions[versions.index(twice[-1]) + 1:]
     assert later and not any("Incomplete" in status_lines(clones, v.blob) for v in later)
     registration = (Path(__file__).resolve().parents[1] / "PREREGISTRATION.md").read_text(

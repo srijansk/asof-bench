@@ -5,6 +5,7 @@ real proxy and the real API is made by hand, as systems/README.md describes."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import socketserver
@@ -128,6 +129,50 @@ def closed_port() -> tuple[str, int]:
     return address
 
 
+REAL_GETADDRINFO = socket.getaddrinfo
+
+
+def resolver(names: dict[str, str]):
+    """A stand-in for ``socket.getaddrinfo`` as a container on an internal network sees it: each
+    name of ``names`` resolves to its address, every other name raises gaierror, as Docker's DNS
+    does for a name it does not forward, and an address is looked up as usual (no DNS is asked)."""
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host in names:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (names[host], port or 0))]
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise socket.gaierror(socket.EAI_AGAIN,
+                                  "Temporary failure in name resolution") from None
+        return REAL_GETADDRINFO(host, port, *args, **kwargs)
+
+    return getaddrinfo
+
+
+def test_the_dns_check_fails_a_host_that_resolves_and_passes_one_that_does_not(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", resolver({"github.com": "140.82.112.3",
+                                                         "embedder": "172.22.0.3"}))
+    leaked = netcheck.check_dns("github.com", must_resolve=False)
+    assert not leaked.ok and "140.82.112.3" in leaked.detail  # a DNS route out
+    held = netcheck.check_dns("pypi.org", must_resolve=False)
+    assert held.ok and "Temporary failure in name resolution" in held.detail
+    assert netcheck.check_dns("embedder", must_resolve=True).ok  # a service the system runs
+    missing = netcheck.check_dns("neo4j", must_resolve=True)
+    assert not missing.ok and "does not resolve" in missing.detail
+
+
+def test_the_dns_checks_name_each_host_once_and_skip_addresses(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", resolver({"embedder": "172.22.0.3"}))
+    checks = netcheck.dns_checks(
+        [("api.example.invalid", 443), ("github.com", 443), ("GitHub.com", 80),
+         ("160.79.104.10", 443), ("2606:4700::1111", 443)],
+        [("embedder", 8080), ("embedder", 8081), ("172.22.0.9", 7687)])
+    assert [(check.kind, check.target, check.ok) for check in checks] == [
+        ("dns", "api.example.invalid", True), ("dns", "github.com", True),
+        ("dns", "embedder", True)]
+
+
 def test_the_checks_that_connect():
     with stand_in(403) as proxy:
         assert netcheck.check_deny(proxy, ("github.com", 443), TIMEOUT).ok
@@ -149,6 +194,7 @@ def test_main_writes_the_report_and_exits_by_it(tmp_path, monkeypatch):
     mounts = tmp_path / "mounts"
     mounts.write_text(MOUNTS, encoding="utf-8")
     monkeypatch.setattr(netcheck, "MOUNTS_FILE", mounts)
+    monkeypatch.setattr(socket, "getaddrinfo", resolver({}))
     out = tmp_path / "netcheck.json"
     host, closed = closed_port()
     with stand_in(403) as (proxy_host, proxy_port), listening() as (service_host, service_port):
@@ -162,6 +208,14 @@ def test_main_writes_the_report_and_exits_by_it(tmp_path, monkeypatch):
         assert [(check["kind"], check["target"], check["ok"]) for check in written["checks"]] == [
             ("deny", "github.com:443", True), ("deny", "pypi.org:443", True),
             ("deny", "peps.python.org:443", True), ("direct", f"{host}:{closed}", True),
-            ("service", f"{service_host}:{service_port}", True), ("mounts", str(mounts), True)]
+            ("service", f"{service_host}:{service_port}", True), ("dns", "github.com", True),
+            ("dns", "pypi.org", True), ("dns", "peps.python.org", True),
+            ("mounts", str(mounts), True)]
         assert netcheck.main([*argv[:-4], "--mounts", "/input", "--report", str(out)]) == 1
         assert json.loads(out.read_text(encoding="utf-8"))["ok"] is False
+        # The proxy refuses pypi.org, but a resolver that answers for it is a route out.
+        monkeypatch.setattr(socket, "getaddrinfo", resolver({"pypi.org": "151.101.0.223"}))
+        assert netcheck.main(argv) == 1
+        failed = [check for check in json.loads(out.read_text(encoding="utf-8"))["checks"]
+                  if not check["ok"]]
+        assert [(check["kind"], check["target"]) for check in failed] == [("dns", "pypi.org")]

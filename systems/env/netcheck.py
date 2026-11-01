@@ -19,6 +19,10 @@ The checks, each written to the report with its result:
   fail within the timeout;
 - service: each target, a service the system runs itself inside the environment, must accept a
   TCP connection;
+- dns: no ``--allow`` or ``--deny`` host may resolve from inside the container, since the proxy,
+  not the system, resolves the hosts it reaches, and a name that resolves here is a DNS route out
+  (queries leave, and answers come back); each ``--services`` host must resolve, through Docker's
+  embedded DNS. An IP address is looked up without asking DNS, so it is not checked;
 - mounts: /proc/mounts may show mounts only at the ``--mounts`` paths and beneath them, besides
   the container's own root, the /etc/hosts, /etc/hostname and /etc/resolv.conf that Docker
   manages, and the kernel's own filesystems at and beneath /proc, /sys and /dev. A mount anywhere
@@ -32,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import json
 import re
 import socket
@@ -64,7 +69,7 @@ TARGET = re.compile(r"(?:\[(?P<ipv6>[0-9A-Fa-f:.]+)\]|(?P<host>[^\s:\[\]/]+)):(?
 
 @dataclass(frozen=True)
 class Check:
-    """One check and its result: ``kind`` is allow, deny, direct, service or mounts."""
+    """One check and its result: ``kind`` is allow, deny, direct, service, dns or mounts."""
 
     kind: str
     target: str
@@ -233,6 +238,42 @@ def check_service(target: tuple[str, int], timeout: float) -> Check:
     return Check("service", name(target), True, "accepts a TCP connection")
 
 
+def is_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def check_dns(host: str, must_resolve: bool) -> Check:
+    """Whether ``host`` resolves from inside the container, as ``must_resolve`` says it must or
+    must not: a service the system runs must resolve, through Docker's embedded DNS, and a host
+    beyond the proxy must not, since a name that resolves here is a DNS route out."""
+    try:
+        answers = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        return Check("dns", host, not must_resolve, f"does not resolve: {error}")
+    except (OSError, UnicodeError) as error:
+        return Check("dns", host, False, f"cannot be looked up: {error}")
+    addresses = ", ".join(sorted({answer[4][0] for answer in answers}))
+    detail = f"resolves to {addresses}" + ("" if must_resolve else ", a DNS route out")
+    return Check("dns", host, must_resolve, detail)
+
+
+def dns_checks(beyond: Sequence[tuple[str, int]],
+               services: Sequence[tuple[str, int]]) -> list[Check]:
+    """The DNS checks: each host ``beyond`` the proxy (the ``--allow`` and ``--deny`` targets)
+    must not resolve, and each service must. Each name is checked once, in lower case, and an IP
+    address not at all."""
+
+    def names(targets: Sequence[tuple[str, int]]) -> list[str]:
+        return list(dict.fromkeys(host.lower() for host, _ in targets if not is_address(host)))
+
+    return ([check_dns(host, must_resolve=False) for host in names(beyond)]
+            + [check_dns(host, must_resolve=True) for host in names(services)])
+
+
 def _argument(parse):
     def parsed(text: str):
         try:
@@ -248,10 +289,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                  "environment that section 8 requires.")
     parser.add_argument("--proxy", required=True, type=_argument(parse_proxy),
                         help="the egress proxy, as http://host:port")
-    for flag, kind in (("--allow", "targets the proxy must open, each answering 401 with no key"),
-                       ("--deny", "targets the proxy must refuse with 403"),
+    for flag, kind in (("--allow", "targets the proxy must open, each answering 401 with no key, "
+                                   "and that must not resolve here"),
+                       ("--deny", "targets the proxy must refuse with 403, and that must not "
+                                  "resolve here"),
                        ("--direct", "targets a direct connection must not reach"),
-                       ("--services", "the environment's own services, which must accept")):
+                       ("--services", "the environment's own services, which must resolve and "
+                                      "accept")):
         parser.add_argument(flag, default=[], type=_argument(parse_targets), action="extend",
                             help=f"comma-separated host:port {kind}")
     parser.add_argument("--mounts", default=[], type=_argument(parse_paths), action="extend",
@@ -265,6 +309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     checks += [check_deny(args.proxy, target, args.timeout) for target in args.deny]
     checks += [check_direct(target, args.timeout) for target in args.direct]
     checks += [check_service(target, args.timeout) for target in args.services]
+    checks += dns_checks([*args.allow, *args.deny], args.services)
     try:
         checks.append(check_mounts(MOUNTS_FILE.read_text(encoding="utf-8"), args.mounts))
     except OSError as error:

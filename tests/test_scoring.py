@@ -468,10 +468,13 @@ def uniform(value: int) -> dict[str, int]:
 
 
 def test_pilot_gate_1_stops_when_every_system_is_at_the_ceiling():
+    from asofbench.scoring import DECISIONS
+
     rows, per_item = pilot_rows(uniform(90), uniform(50))
     gates = pilot_gates(rows, per_item)
     assert gates["stopped_at"] == 1 and gates["signal"] is False
-    assert isinstance(gates["detail"], dict) and gates["detail"]["decision"]
+    # The decision is a top-level field, as it is when the pilot is not evaluable.
+    assert gates["decision"] == DECISIONS[1] and "decision" not in gates["detail"]
     # One system under 85% and the gate does not fire.
     rows, per_item = pilot_rows({**uniform(90), "closed-book": 84}, uniform(50))
     assert pilot_gates(rows, per_item)["stopped_at"] != 1
@@ -667,7 +670,7 @@ def test_pilot_gate_4_holm_adjusts_the_ten_pairs():
     assert pair["p"] == mcnemar_exact(1, 8) == 2 * 10 / 512
     assert pair["p_holm"] == pytest.approx(10 * 2 * 10 / 512) and pair["qualifies"] is False
     assert gate4["unadjusted"]["qualifying"] == 2
-    assert gates["detail"]["decision"].startswith("report the null")
+    assert gates["decision"].startswith("report the null")
 
 
 def test_pilot_gate_3_on_a_tie_compares_graphiti_with_each_baseline():
@@ -2488,7 +2491,8 @@ def test_the_majority_reading_of_a_decided_pilot_may_itself_not_be_evaluable(tmp
     monkeypatch.setattr(scoring, "_majorities", lambda *args: {
         s: found for s, found in real(*args).items() if s != "graphiti"})
     out = tmp_path / "out"
-    assert run_score(data, [write_answers(tmp_path / "a.jsonl", rows)], out) == 0
+    assert run_score(data, [write_answers(tmp_path / "a.jsonl", rows)], out,
+                     items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     # Averaged over the runs every system scores 26/30, so gate 1 stops the pilot; on majority
     # results they score 0.8 and gate 4 would need the missing per-item results.
@@ -2599,7 +2603,7 @@ def test_gates_json_when_the_answers_cover_the_pilot(tmp_path, registered):
     right = {s: (9, 6) for s in SYSTEMS}
     path = write_answers(tmp_path / "a.jsonl", pilot_answers(ids, right))
     out = tmp_path / "out"
-    assert run_score(data, [path], out) == 0
+    assert run_score(data, [path], out, items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     assert gates["evaluable"] is True
     assert gates["stopped_at"] == 1 and gates["signal"] is False  # 9 of 10 everywhere
@@ -2614,7 +2618,7 @@ def test_gates_json_when_the_answers_cover_the_pilot(tmp_path, registered):
              "hipporag2": (5, 4), "graphiti": (10, 6)}
     path = write_answers(tmp_path / "b.jsonl", pilot_answers(ids, right))
     out2 = tmp_path / "out2"
-    assert run_score(data, [path], out2) == 0
+    assert run_score(data, [path], out2, items=data / "pilot.json") == 0
     gates = load(out2, "gates.json")
     # 10 of 10 against 0 of 10: ten discordant items, p = 0.002, Holm-adjusted 0.02, 100 points.
     assert gates["stopped_at"] is None and gates["signal"] is True
@@ -2646,7 +2650,8 @@ def test_the_pilot_section_gives_its_outcome_in_words(tmp_path, registered):
     for name, (right, outcome, decision) in scenarios.items():
         out = tmp_path / name
         assert run_score(data, [write_answers(tmp_path / f"{name}.jsonl",
-                                              pilot_answers(ids, right))], out) == 0
+                                              pilot_answers(ids, right))], out,
+                         items=data / "pilot.json") == 0
         section = pilot_section(out)
         assert f'{outcome} The decision is "{decision}".' in section, name
         reading = outcome[0].lower() + outcome[1:-1]
@@ -2663,7 +2668,7 @@ def test_the_pilot_section_says_when_gate_4_was_not_reached(tmp_path, registered
     registered(data)
     stopped = tmp_path / "stopped"
     answers = write_answers(tmp_path / "a.jsonl", pilot_answers(ids, {s: (9, 6) for s in SYSTEMS}))
-    assert run_score(data, [answers], stopped) == 0
+    assert run_score(data, [answers], stopped, items=data / "pilot.json") == 0
     assert load(stopped, "gates.json")["stopped_at"] == 1
     text = (stopped / "results.md").read_text(encoding="utf-8")
     assert ("Gate 4 was not reached (the pilot stopped at gate 1); for reference, gate 4 reads "
@@ -2674,7 +2679,7 @@ def test_the_pilot_section_says_when_gate_4_was_not_reached(tmp_path, registered
              "hipporag2": (5, 4), "graphiti": (10, 6)}
     reached = tmp_path / "reached"
     assert run_score(data, [write_answers(tmp_path / "b.jsonl", pilot_answers(ids, right))],
-                     reached) == 0
+                     reached, items=data / "pilot.json") == 0
     assert load(reached, "gates.json")["stopped_at"] is None
     text = (reached / "results.md").read_text(encoding="utf-8")
     assert "Gate 4 reads the ten pairs of pilot systems without closed book" in text
@@ -2711,14 +2716,14 @@ def test_a_missing_pilot_answer_is_wrong_and_the_gates_are_still_decided(tmp_pat
     full = pilot_answers(ids, right)
     path = write_answers(tmp_path / "full.jsonl", full)
     complete = tmp_path / "complete"
-    assert run_score(data, [path], complete) == 0
+    assert run_score(data, [path], complete, items=data / "pilot.json") == 0
     assert load(complete, "gates.json")["stopped_at"] == 1  # 9 of 10 everywhere
     # bm25 leaves out one change item and one current item that it would have got right.
     gone = (ids["change"][0], ids["current"][0])
     rows = [r for r in full if not (r["system"] == "bm25" and r["id"] in gone)]
     path = write_answers(tmp_path / "short.jsonl", rows)
     out = tmp_path / "out"
-    assert run_score(data, [path], out) == 0
+    assert run_score(data, [path], out, items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     assert gates["evaluable"] is True
     # The omission is a wrong answer: bm25 falls to 8 of 10, under the ceiling, so the ceiling gate
@@ -2742,7 +2747,7 @@ def test_a_missing_pilot_answer_is_wrong_and_the_gates_are_still_decided(tmp_pat
     no_run = [r for r in full if not (r["system"] == "graphiti" and r["run"] == 3)]
     path = write_answers(tmp_path / "norun.jsonl", no_run)
     out2 = tmp_path / "out2"
-    assert run_score(data, [path], out2) == 0
+    assert run_score(data, [path], out2, items=data / "pilot.json") == 0
     assert load(out2, "gates.json")["evaluable"] is True
     assert {"system": "graphiti", "arm": "H-", "runs": ["3"]} in load(out2)["answers"][
         "missing_runs"]
@@ -2760,7 +2765,7 @@ def test_gates_say_whether_the_measure_matters(tmp_path, registered):
                 rows.append(answer(item_id, system, "H-", run, value))
     path = write_answers(tmp_path / "a.jsonl", rows)
     out = tmp_path / "out"
-    assert run_score(data, [path], out) == 0
+    assert run_score(data, [path], out, items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     assert gates["detail"]["measure"] == "accuracy_mean_over_runs"
     assert gates["stopped_at"] == 2  # the engines fail alike on current and change
@@ -2775,10 +2780,11 @@ def test_gates_json_follows_the_answers(tmp_path, registered):
     right = {s: (9, 6) for s in SYSTEMS}
     out = tmp_path / "out"
     full = write_answers(tmp_path / "full.jsonl", pilot_answers(ids, right))
-    assert run_score(data, [full], out) == 0 and load(out, "gates.json")["evaluable"] is True
+    assert run_score(data, [full], out, items=data / "pilot.json") == 0
+    assert load(out, "gates.json")["evaluable"] is True
     # Scored again with fewer systems, the same directory says so rather than keeping the old file.
     partial = write_answers(tmp_path / "partial.jsonl", pilot_answers(ids, right, SYSTEMS[:3]))
-    assert run_score(data, [partial], out) == 0
+    assert run_score(data, [partial], out, items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     assert gates["evaluable"] is False and gates["missing_systems"] == list(SYSTEMS[3:])
     # With no pilot in the data there are no gates, and an old file is removed.
@@ -2796,7 +2802,8 @@ def test_gates_are_deterministic_and_ignore_h_plus_answers(tmp_path, registered)
     rows += [dict(r, arm="H+", answer="Draft") for r in rows]  # H+ answers decide nothing
     path = write_answers(tmp_path / "a.jsonl", rows)
     one, two = tmp_path / "one", tmp_path / "two"
-    assert run_score(data, [path], one) == 0 and run_score(data, [path], two) == 0
+    assert run_score(data, [path], one, items=data / "pilot.json") == 0
+    assert run_score(data, [path], two, items=data / "pilot.json") == 0
     assert (one / "gates.json").read_bytes() == (two / "gates.json").read_bytes()
     assert load(one, "gates.json")["stopped_at"] == 1
 
@@ -2847,7 +2854,7 @@ def test_a_pilot_whose_scope_leaves_out_pilot_items_decides_nothing(tmp_path, re
     entries = {"bm25": {"arms": ["H+"]}}
     narrowed = tmp_path / "narrowed"
     assert run_score(data, [write_answers(tmp_path / "b.jsonl", rows)], narrowed,
-                     entries=entries) == 0
+                     entries=entries, items=data / "pilot.json") == 0
     gates = load(narrowed, "gates.json")
     assert gates["reasons"] == ["the entries file leaves bm25 out of H- F1, which the gates read"]
     assert gates["evaluable"] is False and gates["missing_systems"] == []
@@ -2881,7 +2888,7 @@ def test_a_pilot_answered_by_another_model_or_with_other_settings_decides_nothin
          ["embedded with voyageai/voyage-4-lite, not the registered embedding model"]),
     ):
         out = tmp_path / name
-        assert score_as(data, rows, out, **models) == 0, name
+        assert score_as(data, rows, out, "--items", str(data / "pilot.json"), **models) == 0, name
         gates = load(out, "gates.json")
         assert (gates["evaluable"], gates.get("stopped_at", "none")) == (False, "none"), name
         assert gates["reasons"] == reasons, name
@@ -2892,49 +2899,107 @@ def test_a_pilot_answered_by_another_model_or_with_other_settings_decides_nothin
         assert f"so no gate decides: {'; '.join(reasons)}." in pilot_section(out), name
 
 
-def test_the_registered_pilot_run_decides_as_before(tmp_path, registered):
-    """The registered pilot run, --items data/v0.1/pilot.json with the registered answering model
-    and settings, decides the gates as a run over every item does: the scope holds every pilot
-    item either way, and no reason is given."""
+def with_items_beside_the_pilot(data: Path, count: int) -> list[str]:
+    """Adds ``count`` F1-change PEP items that pilot.json does not list to the build in ``data``,
+    as the registered build holds items beside its pilot list, and returns their ids."""
+    beside = [f"F1-change-pep{100 + n}-2010-01-01" for n in range(count)]
+    with (data / "questions.jsonl").open("a", encoding="utf-8") as f:
+        f.writelines(dumps(question(i, "F1", "change", "pep", "status", ("H+", "H-"))) + "\n"
+                     for i in beside)
+    with (data / "gold.jsonl").open("a", encoding="utf-8") as f:
+        f.writelines(dumps(gold_row(i, "Final", "adopted")) + "\n" for i in beside)
+    return beside
+
+
+def test_only_a_run_of_exactly_the_pilot_items_is_the_registered_pilot_run(tmp_path, registered):
+    """Section 13: the registered pilot run's scope is exactly the items of pilot.json, given with
+    --items: --items pilot.json, or a list of the same ids in any order, decides, with no reason.
+    On a build that holds items beside its pilot list, as the registered one does, a run of every
+    item, a wider list and a list that swaps a pilot item for another are not the registered pilot
+    run: each records every gate's computation, on the pilot items in its scope, with its reasons
+    and no decision. A run with no --items is never the registered pilot run, even on a build whose
+    every item is a pilot item, so a full run never decides the gates."""
+    from asofbench.scoring import REGISTERED_PILOT
+
     data, ids = pilot_data(tmp_path)
+    beside = with_items_beside_the_pilot(data, 3)
     registered(data)
-    rows = write_answers(tmp_path / "a.jsonl", pilot_answers(ids, {s: (9, 6) for s in SYSTEMS}))
-    listed, whole = tmp_path / "listed", tmp_path / "whole"
-    assert run_score(data, [rows], listed, items=data / "pilot.json") == 0
-    assert run_score(data, [rows], whole) == 0
-    gates = load(listed, "gates.json")
-    assert (gates["evaluable"], gates["stopped_at"], gates["signal"]) == (True, 1, False)
-    assert gates["reasons"] == [] and load(listed)["pilot"]["reasons"] == []
-    assert gates == load(whole, "gates.json")
-    assert "so no gate decides" not in pilot_section(listed)
+    rows = pilot_answers(ids, {s: (9, 6) for s in SYSTEMS})  # the pilot items only
+    pilot = ids["change"] + ids["current"]
+    runs = {
+        "listed": ("--items", str(data / "pilot.json")),
+        "reordered": ("--items", str(write_items(tmp_path / "reordered.json", pilot[::-1]))),
+        "every": (),
+        "wider": ("--items", str(write_items(tmp_path / "wider.json", [*pilot, beside[0]]))),
+        "swapped": ("--items", str(write_items(tmp_path / "swapped.json",
+                                                [*pilot[1:], beside[0]]))),
+    }
+    for name, extra in runs.items():
+        assert score_as(data, rows, tmp_path / name, *extra) == 0, name
+    gates = {name: load(tmp_path / name, "gates.json") for name in runs}
+    listed = gates["listed"]
+    assert (listed["evaluable"], listed["stopped_at"], listed["signal"]) == (True, 1, False)
+    assert listed["reasons"] == [] and load(tmp_path / "listed")["pilot"]["reasons"] == []
+    assert "so no gate decides" not in pilot_section(tmp_path / "listed")
+    assert gates["reordered"] == listed  # the same ids in another order: the same scope
+    holds = "items that pilot.json does not list"
+    reasons = {
+        "every": [f"the run's scope is every item (no --items), which holds 3 {holds}"],
+        "wider": ["the run's scope holds 1 item that pilot.json does not list"],
+        "swapped": ["the run's scope leaves out 1 pilot item",
+                    "the run's scope holds 1 item that pilot.json does not list"],
+    }
+    for name, why in reasons.items():
+        found = gates[name]
+        assert (found["evaluable"], found["reasons"]) == (False, why), name
+        assert found["decision"] == f"not evaluable: {'; '.join(why)}; {REGISTERED_PILOT}", name
+        assert not {"stop", "signal", "stopped_at"} & decision_keys(found), name
+        assert load(tmp_path / name)["pilot"]["reasons"] == why, name
+        assert f"so no gate decides: {'; '.join(why)}." in pilot_section(tmp_path / name), name
+    # Every pilot item is in the scope of a run of every item and of the wider list, so each
+    # records the computation of the registered pilot run on the same answers, deciding nothing.
+    for name in ("every", "wider"):
+        assert gates[name]["detail"]["accuracy_change"] == listed["detail"]["accuracy_change"]
+    # A build whose every item is a pilot item: a run with no --items is still not the pilot run.
+    (tmp_path / "alone").mkdir()
+    alone, _ = pilot_data(tmp_path / "alone")
+    registered(alone)
+    assert score_as(alone, rows, tmp_path / "alone-every") == 0
+    assert load(tmp_path / "alone-every", "gates.json")["reasons"] == [
+        "the run's scope is every item (no --items)"]
+    assert score_as(alone, rows, tmp_path / "alone-listed", "--items",
+                    str(alone / "pilot.json")) == 0
+    assert load(tmp_path / "alone-listed", "gates.json")["evaluable"] is True
 
 
 def test_a_build_that_is_not_the_registered_one_neither_claims_nor_decides(tmp_path, registered):
     """Sections 12 and 13: a run is the registered full run, and a pilot run decides, only on the
     registered build, whose questions, gold and pilot list have the SHA-256s in REGISTERED_DATA
-    (data/v0.1's). A small build left unmarked makes every comparison and has every pilot answer,
-    and still neither claims nor decides, saying why; marked as the registered build, the same
-    answers claim and decide. A build without one of the three files names it."""
+    (data/v0.1's). On a small build left unmarked, a full run makes every comparison and claims
+    nothing, and a pilot run (--items pilot.json) has every pilot answer and decides nothing, each
+    saying why; marked as the registered build, the same answers claim in the full run and decide
+    in the pilot run. A build without one of the three files names it."""
     data, ids = pilot_data(tmp_path)
     rows = pilot_answers(ids, {s: (9, 6) for s in SYSTEMS})
     rows += like_grep(rows, ("dense", "hybrid", "ppr"))  # every compared system answers
+    listed = ("--items", str(data / "pilot.json"))
     reason = ("the build is not the registered one: questions.jsonl, gold.jsonl and pilot.json "
               "differ from the registered files by SHA-256")
-    plain = tmp_path / "plain"
-    assert score_as(data, rows, plain) == 0
-    headline, gates = load(plain)["headline"], load(plain, "gates.json")
+    plain, plain_pilot = tmp_path / "plain", tmp_path / "plain-pilot"
+    assert score_as(data, rows, plain) == 0 and score_as(data, rows, plain_pilot, *listed) == 0
+    headline, gates = load(plain)["headline"], load(plain_pilot, "gates.json")
     assert (headline["registered"], headline["not_registered"]) == (False, [reason])
     assert len(headline["comparisons"]) == 14
     assert not any("claim" in c for c in headline["comparisons"])
     assert reason in headline_intro(plain)
     assert (gates["evaluable"], gates["reasons"]) == (False, [reason])
     assert not {"stop", "signal", "stopped_at"} & decision_keys(gates)
-    assert f"so no gate decides: {reason}." in pilot_section(plain)
+    assert f"so no gate decides: {reason}." in pilot_section(plain_pilot)
     registered(data)
-    marked = tmp_path / "marked"
-    assert score_as(data, rows, marked) == 0
-    assert (load(marked)["headline"]["registered"], load(marked, "gates.json")["stopped_at"]) == (
-        True, 1)
+    marked, marked_pilot = tmp_path / "marked", tmp_path / "marked-pilot"
+    assert score_as(data, rows, marked) == 0 and score_as(data, rows, marked_pilot, *listed) == 0
+    assert (load(marked)["headline"]["registered"],
+            load(marked_pilot, "gates.json")["stopped_at"]) == (True, 1)
     (data / "pilot.json").unlink()
     absent = tmp_path / "absent"
     assert score_as(data, rows, absent) == 0
@@ -2950,9 +3015,10 @@ def test_a_pilot_that_cannot_be_decided_has_one_shape_whatever_the_cause(tmp_pat
     registered(data)
     rows = pilot_answers(ids, {s: (9, 6) for s in SYSTEMS})
     missing, sonnet = tmp_path / "missing", tmp_path / "sonnet"
+    listed = ("--items", str(data / "pilot.json"))
     assert score_as(data, [r for r in rows if r["system"] not in ("bm25", "graphiti")],
-                    missing) == 0
-    assert score_as(data, rows, sonnet, answering_model="claude-sonnet-5-5") == 0
+                    missing, *listed) == 0
+    assert score_as(data, rows, sonnet, *listed, answering_model="claude-sonnet-5-5") == 0
     one, two = load(missing, "gates.json"), load(sonnet, "gates.json")
     assert set(one) == set(two)
     assert {"measure", "accuracy_change", "accuracy_current"} <= set(one["detail"]) & set(
@@ -2964,6 +3030,30 @@ def test_a_pilot_that_cannot_be_decided_has_one_shape_whatever_the_cause(tmp_pat
                                       "registered answering model; the gates decide only in the "
                                       "registered pilot run")
     assert not {"stop", "signal", "stopped_at"} & (decision_keys(one) | decision_keys(two))
+
+
+def test_gates_json_gives_its_decision_at_the_top_level_in_every_shape(tmp_path, registered):
+    """Section 13: gates.json's ``decision`` is a top-level field whether the pilot is decided or
+    not evaluable, so a script that reads ``gates["decision"]`` finds it in every run; a decided
+    pilot keeps no second copy under ``detail``, and results.md quotes the same decision."""
+    from asofbench.scoring import DECISIONS
+
+    data, ids = pilot_data(tmp_path)
+    registered(data)
+    rows = pilot_answers(ids, {s: (9, 6) for s in SYSTEMS})  # 9 of 10 everywhere: gate 1 stops
+    listed = ("--items", str(data / "pilot.json"))
+    decided, sonnet, missing = tmp_path / "decided", tmp_path / "sonnet", tmp_path / "missing"
+    assert score_as(data, rows, decided, *listed) == 0
+    assert score_as(data, rows, sonnet, *listed, answering_model="claude-sonnet-5-5") == 0
+    assert score_as(data, [r for r in rows if r["system"] != "bm25"], missing, *listed) == 0
+    shapes = {out.name: load(out, "gates.json") for out in (decided, sonnet, missing)}
+    assert (shapes["decided"]["evaluable"], shapes["decided"]["decision"]) == (True, DECISIONS[1])
+    assert "decision" not in shapes["decided"]["detail"]
+    assert f'The decision is "{DECISIONS[1]}".' in pilot_section(decided)
+    for name in ("sonnet", "missing"):
+        assert shapes[name]["evaluable"] is False, name
+        assert shapes[name]["decision"].startswith("not evaluable: "), name
+        assert "decision" not in shapes[name]["detail"], name
 
 
 def test_the_pilot_record_gives_its_reasons_as_a_list_in_every_shape(tmp_path, registered):
@@ -3072,11 +3162,13 @@ def test_the_headline_compares_each_context_system_with_grep_at_d_per_corpus(tmp
     assert run_score(data, [write_answers(tmp_path / "a.jsonl", headline_answers(ids))], out) == 0
     headline = load(out)["headline"]
     # Four compared systems have no answer, and Graphiti none on Ethereum, so the run makes 5 of
-    # the 14 comparisons and is not the registered full run.
+    # the 14 comparisons and is not the registered full run; Graphiti also leaves runs out of the
+    # PEP items it is compared on.
     assert headline["registered"] is False
     assert headline["not_registered"] == [
         f"dense, hybrid, ppr and hipporag2 are not compared on pep or eth ({NO_ANSWER})",
-        f"graphiti is not compared on eth ({NO_ANSWER})"]
+        f"graphiti is not compared on eth ({NO_ANSWER})",
+        "graphiti answered 29 of the 36 runs on the 12 compared pep items"]
     assert headline["baseline"] == "grep-at-d"
     assert (headline["arm"], headline["family"], headline["stratum"]) == ("H-", "F1", "change")
     assert headline["systems"] == ["bm25", "dense", "hybrid", "ppr", "hipporag2", "graphiti",
@@ -3457,7 +3549,7 @@ def test_graphiti_reduced_is_the_pilots_graphiti(tmp_path, registered):
     reduced = {("graphiti-reduced" if s == "graphiti" else s): v for s, v in right.items()}
     out = tmp_path / "out"
     assert run_score(data, [write_answers(tmp_path / "a.jsonl", pilot_answers(
-        ids, reduced, systems=tuple(reduced)))], out) == 0
+        ids, reduced, systems=tuple(reduced)))], out, items=data / "pilot.json") == 0
     gates = load(out, "gates.json")
     assert (gates["evaluable"], gates["stopped_at"], gates["signal"]) == (True, None, True)
     assert gates["pilot_systems"] == ["closed-book", "bm25", "grep-at-d", "long-context",
@@ -3471,7 +3563,7 @@ def test_graphiti_reduced_is_the_pilots_graphiti(tmp_path, registered):
     # The same answers under the id graphiti decide the same.
     plain = tmp_path / "plain"
     assert run_score(data, [write_answers(tmp_path / "b.jsonl", pilot_answers(ids, right))],
-                     plain) == 0
+                     plain, items=data / "pilot.json") == 0
     assert load(plain, "gates.json")["pilot_systems"][-1] == "graphiti"
     assert (load(plain, "gates.json")["stopped_at"], load(plain, "gates.json")["signal"]) == (
         None, True)
@@ -3586,7 +3678,8 @@ def test_the_gate_4_table_names_its_two_systems_a_and_b(tmp_path, registered):
     registered(data)
     out = tmp_path / "out"
     rows = pilot_answers(ids, {s: (9, 6) for s in SYSTEMS})
-    assert run_score(data, [write_answers(tmp_path / "a.jsonl", rows)], out) == 0
+    assert run_score(data, [write_answers(tmp_path / "a.jsonl", rows)], out,
+                     items=data / "pilot.json") == 0
     text = (out / "results.md").read_text(encoding="utf-8")
     assert ("| System A | System B | Gap | p | Holm-adjusted p | Gate 4 | Unadjusted reading |"
             in text)
@@ -4089,10 +4182,14 @@ def headline_intro(out: Path) -> str:
 
 
 def full_answers(ids) -> list[dict]:
-    """``headline_answers``, with Graphiti also answering the Ethereum items (wrong in every run)
-    and the four compared systems it leaves out answering as grep at D does: every compared system
-    and grep at D have a scored answer on each corpus, so the run makes all 14 comparisons."""
-    rows = headline_answers(ids)
+    """``headline_answers``, completed: Graphiti answers every run of the PEP items (wrong in each
+    run that ``GRAPHITI_PEP`` leaves out, so its majority results and accuracy do not move) and
+    every Ethereum item (wrong in every run), and the four compared systems it leaves out answer
+    as grep at D does. Every compared system and grep at D then answer every H- F1-change item of
+    each corpus in runs 1, 2 and 3, so the run makes all 14 comparisons on complete answers."""
+    rows = [r for r in headline_answers(ids) if r["system"] != "graphiti"]
+    for k, item_id in enumerate(ids["pep"]):
+        rows += say("graphiti", item_id, tuple(bool(right) for right in GRAPHITI_PEP[k]))
     rows += [r for item_id in ids["eth"] for r in say("graphiti", item_id, WRONG)]
     return rows + like_grep(rows, NOT_IN_ANSWERS)
 
@@ -4173,6 +4270,98 @@ def test_only_the_registered_full_run_makes_claims(tmp_path, registered):
         "the build is not the registered one: pilot.json is absent"]
 
 
+def test_the_registered_full_run_needs_every_run_of_both_sides(tmp_path, registered):
+    """Section 12: the registered full run also needs grep at D and each compared system to have
+    a scored answer to every H- F1-change item of each corpus in runs 1, 2 and 3. A run that lacks
+    one run of one item, of grep at D or of a compared system, still makes all 14 comparisons (one
+    scored answer makes a comparison), but its rows give readings, not claims, and it names each
+    incomplete side and corpus, one reason each, in results.json and in the opening paragraph of
+    results.md's headline, before the table."""
+    data, ids = headline_data(tmp_path)  # 12 H- F1-change items per corpus
+    registered(data)
+    rows = full_answers(ids)
+    complete = tmp_path / "complete"
+    assert score_as(data, rows, complete) == 0
+    headline = load(complete)["headline"]
+    assert (headline["registered"], headline["not_registered"]) == (True, [])
+    grep_pep, grep_eth, ppr_eth = (("grep-at-d", ids["pep"][0], 3), ("grep-at-d", ids["eth"][0], 1),
+                                   ("ppr", ids["eth"][5], 2))
+    on = {"pep": "grep-at-d answered 35 of the 36 runs on the 12 compared pep items",
+          "eth": "grep-at-d answered 35 of the 36 runs on the 12 compared eth items",
+          "ppr": "ppr answered 35 of the 36 runs on the 12 compared eth items"}
+    cases = {"grep": ([grep_pep], [on["pep"]]), "ppr": ([ppr_eth], [on["ppr"]]),
+             "grep on both": ([grep_pep, grep_eth], [on["pep"], on["eth"]]),
+             "both sides": ([grep_pep, ppr_eth], [on["pep"], on["ppr"]])}
+    for name, (gaps, reasons) in cases.items():
+        out = tmp_path / name.replace(" ", "-")
+        assert score_as(data, [r for r in rows if (r["system"], r["id"], r["run"]) not in gaps],
+                        out) == 0, name
+        headline = load(out)["headline"]
+        assert (headline["registered"], headline["not_registered"]) == (False, reasons), name
+        assert len(headline["comparisons"]) == 14, name  # every comparison is still made
+        assert not any("claim" in c for c in headline["comparisons"]), name
+        intro, section = headline_intro(out), headline_section(out)
+        assert intro.startswith("This run is not the registered full run"), name
+        for reason in reasons:  # results.md names the author's retriever as its tables do
+            said = reason.replace("ppr", "ppr (author's own)")
+            assert said in intro and section.index(said) < section.index("| System |"), name
+    # The registered full run's opening paragraph states the condition it meets.
+    assert ("grep at D and each compared system having a scored answer to every H- F1-change item "
+            "of each corpus in runs 1, 2 and 3") in headline_intro(complete)
+
+
+def test_the_registered_full_run_uses_the_registered_entries(tmp_path, registered):
+    """Section 12: the registered full run uses the registered entries: no entries file, or one
+    that only declares outside entries (systems section 11 does not name), whatever it enters
+    them in, or that declares a registered system with its registered entries. An entries file
+    that narrows any registered system's arms or families, one the headline does not compare
+    included, makes the run not the registered full run, with a reason that names the system and
+    what it narrows it to; the comparisons are still made, as readings."""
+    data, ids = headline_data(tmp_path)
+    with (data / "questions.jsonl").open("a", encoding="utf-8") as f:  # a second family, F2
+        f.write(dumps(question("F2-positive-PEP-5-2026-10-27", "F2", "positive", "pep", "set",
+                               ("H+", "H-"))) + "\n")
+    with (data / "gold.jsonl").open("a", encoding="utf-8") as f:
+        f.write(dumps(gold_row("F2-positive-PEP-5-2026-10-27", [387])) + "\n")
+    registered(data)
+    rows = full_answers(ids)
+
+    def entered(name: str, entries: dict) -> tuple[dict, Path]:
+        out = tmp_path / name
+        assert score_as(data, rows, out, "--entries",
+                        str(write_items(tmp_path / f"{name}.json", entries))) == 0, name
+        return load(out)["headline"], out
+
+    for name, entries in (
+        ("outside", {"my-system": {}}),
+        ("outside-narrowed", {"my-system": {"arms": ["H-"], "families": ["F1"]}}),
+        ("as-registered", {"bm25": {}, "dense": {"arms": ["CF", "H+", "H-"]},
+                           "long-context": {"families": ["F1", "F2"]}, "my-system": {}}),
+    ):
+        headline, out = entered(name, entries)
+        assert (headline["registered"], headline["not_registered"]) == (True, []), name
+        assert ("with the registered entries (no entries file, or one that only declares outside "
+                "entries)") in headline_intro(out), name
+    narrows = {
+        "closed-book": ({"closed-book": {"arms": ["H-"]}},
+                        ["the entries file narrows closed-book to the arm H-"]),
+        "dense": ({"dense": {"families": ["F1"]}},
+                  ["the entries file narrows dense to the family F1"]),
+        "ppr": ({"ppr": {"arms": ["H+", "H-"], "families": ["F1"]}, "my-system": {}},
+                ["the entries file narrows ppr to the arms H+ and H- in the family F1"]),
+        "two": ({"closed-book": {"arms": ["H-"]}, "dense": {"families": ["F1"]}},
+                ["the entries file narrows closed-book to the arm H-",
+                 "the entries file narrows dense to the family F1"]),
+    }
+    for name, (entries, reasons) in narrows.items():
+        headline, out = entered(name, entries)
+        assert (headline["registered"], headline["not_registered"]) == (False, reasons), name
+        assert len(headline["comparisons"]) == 14, name  # every comparison is still made
+        assert not any("claim" in c for c in headline["comparisons"]), name
+        intro = headline_intro(out)  # results.md names the author's retriever as its tables do
+        assert all(r.replace("ppr", "ppr (author's own)") in intro for r in reasons), name
+
+
 def test_a_comparison_is_made_only_where_both_sides_have_a_scored_answer(tmp_path, registered):
     """Section 12: a comparison is made only when the compared system and grep at D both have a
     scored answer on the corpus's H- F1-change items in the scope; a row set aside, on another run
@@ -4208,12 +4397,14 @@ def test_a_comparison_is_made_only_where_both_sides_have_a_scored_answer(tmp_pat
                                     for corpus in ("pep", "eth")]
     assert headline["not_registered"] == [f"bm25 is not compared on pep or eth ({NO_ANSWER})"]
     assert not any("claim" in c for c in headline["comparisons"])
-    # (c) An entries file that leaves bm25 out of H- F1: the reason says so.
+    # (c) An entries file that leaves bm25 out of H- F1: the reasons say that it narrows a
+    # registered system and that the comparisons are not made.
     out = tmp_path / "bm25-entries"
     assert score_as(data, rows, out, "--entries", str(write_items(
         tmp_path / "entries.json", {"bm25": {"arms": ["H+"]}}))) == 0
     headline = load(out)["headline"]
-    assert headline["not_registered"] == [f"bm25 is not compared on pep or eth ({LEFT_OUT})"]
+    assert headline["not_registered"] == ["the entries file narrows bm25 to the arm H+",
+                                          f"bm25 is not compared on pep or eth ({LEFT_OUT})"]
     assert f"- Not compared on pep or eth ({LEFT_OUT}): bm25." in headline_section(
         out).splitlines()
 
@@ -4253,8 +4444,9 @@ def test_a_reading_makes_a_comparison_only_on_scored_answers_to_its_own_items(tm
                                                                              registered):
     """Section 12: a reading makes a headline comparison only when both sides have a scored
     answer on the corpus's items left in it. bm25 answers only the PEP items with a header-only
-    episode after their date: the headline compares it on PEP, the reading without those items
-    cannot, and its line says why."""
+    episode after their date: the headline compares it on PEP, since one scored answer makes a
+    comparison, the reading without those items cannot, and its line says why. A side that leaves
+    runs out keeps the run from being the registered full run, which needs every run."""
     data, ids = headline_data(tmp_path)  # PEP and Ethereum items 0 to 5 are flagged
     registered(data)
     rows = [r for r in full_answers(ids)
@@ -4262,7 +4454,9 @@ def test_a_reading_makes_a_comparison_only_on_scored_answers_to_its_own_items(tm
     out = tmp_path / "out"
     assert score_as(data, rows, out) == 0
     headline = load(out)["headline"]
-    assert headline["registered"] is True and ("bm25", "pep") in comparisons_of(headline)
+    assert ("bm25", "pep") in comparisons_of(headline) and len(headline["comparisons"]) == 14
+    assert (headline["registered"], headline["not_registered"]) == (
+        False, ["bm25 answered 18 of the 36 runs on the 12 compared pep items"])
     plain = headline["readings"]["without_header_only_episode"]
     assert ("bm25", "pep") not in comparisons_of(plain) and ("bm25", "eth") in comparisons_of(
         plain)

@@ -2,15 +2,12 @@ cff-version: 1.2.0
 message: If you use asof-bench, please cite it as below.
 title: "asof-bench: what did a project decide, as of date D?"
 type: dataset
-version: prereg-v0.1.1
-date-released: 2026-10-31
-# The commit whose code built data/v0.1 (its manifest's source_commit); the tagged commit, prereg-v0.1.1, follows it.
-commit: f1f0129310758ced2aae27f88c47ef46d24238f0
+version: prereg-v0.1.2
 authors:
   - family-names: Saket
     given-names: Srijan
 license: CC0-1.0
 repository-code: https://github.com/srijansk/asof-bench
 url: https://github.com/srijansk/asof-bench
-abstract: A pre-registered benchmark that asks what a project had decided as of a given date, with gold taken from the git history of the PEP, EIP and ERC decision records. Two licences apply. The dataset, the files in data/v0.1, and the published results are dedicated to the public domain under CC0 1.0 (LICENSE-DATA in the repository, the licence named above); the code that generates and scores it, and the documents, are released under the MIT licence (LICENSE in the repository).
+abstract: A pre-registered benchmark that asks what a project had decided as of a given date, with gold taken from the git history of the PEP, EIP and ERC decision records. Two licences apply. The dataset, the files in data/v0.1, the published results and every file published beside the results report, the label files included, are dedicated to the public domain under CC0 1.0 (LICENSE-DATA in the repository, the licence named above); the code that generates and scores it, and the documents, are released under the MIT licence (LICENSE in the repository).
 keywords: [benchmark, temporal, agent-memory, knowledge-graphs, evaluation]

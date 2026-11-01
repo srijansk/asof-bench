@@ -1,3 +1,5 @@
-# The registered data files are checked byte for byte against the SHA-256 values in their manifest, and the manifest's source digest hashes the working-tree bytes of the generator's modules, so git never converts the line endings of either.
+# The registered data files are checked byte for byte against the SHA-256 values in their manifest, the manifest's source digest hashes the working-tree bytes of the generator's modules, and a test checks the two licence files byte for byte, so git never converts the line endings of any of them.
 data/v0.1/** -text
 src/asofbench/*.py -text
+LICENSE -text
+LICENSE-DATA -text

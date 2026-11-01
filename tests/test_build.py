@@ -406,29 +406,52 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
     ``HEADLINE_FAMILY`` comparisons, a comparison not made counting as p = 1, with what that
     guarantees (leaving systems out never lowers a remaining adjusted p); each reading's own Holm
     family; a comparison made only where both sides have a scored answer; and the registered full
-    run, whose rows alone carry a claim. Also where any of them still uses the old family or
+    run, whose rows alone carry a claim, which uses the registered entries (an entries file that
+    only declares outside entries, or none) and needs grep at D and each compared system to answer
+    every compared item in runs 1, 2 and 3, each unmet condition named, as the scorer words it, in
+    section 12 and the README's examples. Also where any of them still uses the old family or
     claims invariance (``STALE_HEADLINE_WORDS``), and where section 12's default entries leave out
     a system that is entered in fewer families by default (scoring.REGISTERED_FAMILIES)."""
+    from asofbench import scoring
+
     places = {"section 1": registration_section(registration, 1),
               "section 12": registration_section(registration, 12), "README.md": readme}
+    # The scorer's own reasons for a run whose entries file narrows a registered system and for a
+    # side that leaves runs out (scoring._narrowed_words, scoring._answered_words), as the two
+    # documents quote them.
+    examples = (f'"{scoring._narrowed_words("closed-book", ["H-"], None)}"',
+                f'"{scoring._answered_words(HEADLINE_BASELINE, 1, 150, "pep")}"')
     family = f"{HEADLINE_FAMILY} registered comparisons"
     gaps = [f"{where}: {phrase}" for where, text in places.items()
             for phrase in (CLAIM_RULE, "Holm-adjusted", "no detectable difference", family,
                            "registered full run")
             if phrase not in text]
     never_lowers = "leaving systems out of a run never lowers the adjusted p of a comparison that"
+    complete = "grep at D and each compared system answering every compared item in all three runs"
     for where, phrases in (
-        ("section 1", ("in which a comparison that a run does not make counts as p = 1",)),
+        ("section 1", ("in which a comparison that a run does not make counts as p = 1",
+                       "the scoring run of every item with the registered entries", complete)),
         ("section 12", (f"Correction: Holm, over the {family}",
                         "a comparison that the run does not make counts as p = 1", never_lowers,
                         f"Each reading is Holm-adjusted on its own over the {family}, a "
                         "comparison it does not make counting as p = 1, not together with the "
                         "headline's",
-                        "both have at least one scored answer", "Only its rows carry a `claim`")),
+                        "both have at least one scored answer", "Only its rows carry a `claim`",
+                        "when it uses the registered entries, with no entries file or with one "
+                        "that only declares outside entries",
+                        f"have a scored answer, as above, to every H{chr(0x2212)} F1-change "
+                        "item of both corpora in runs 1, 2 and 3", "before the headline's table",
+                        *examples)),
         ("README.md", (f"**Correction**: Holm, over the {family}",
                        "a comparison the run does not make counts as p = 1", never_lowers,
                        f"each Holm-adjusted on its own over the {family}",
-                       "both have at least one scored answer", "Only its rows carry `claim`")),
+                       "both have at least one scored answer", "Only its rows carry `claim`",
+                       "with the registered entries, that makes all 14 comparisons", complete,
+                       "its entries are the registered ones, with no entries file or one that "
+                       "only declares outside entries",
+                       "have a scored answer to every H- F1-change item of both corpora in runs "
+                       "1, 2 and 3", "its reasons in its opening paragraph, before the table",
+                       *examples)),
     ):
         gaps += [f"{where}: {phrase}" for phrase in phrases if phrase not in places[where]]
     gaps += [f"{where}: still says {word!r}" for where, text in places.items()
@@ -772,12 +795,45 @@ def test_the_readme_quotes_what_the_scorer_writes_for_its_own_examples(tmp_path)
     assert quote_gaps(readme, written) == []
 
 
-def decision_gaps(registration: str, readme: str) -> list[str]:
+# The registered pilot run's earlier definition (section 13 and the README at prereg-v0.1.1),
+# under which a run of every item, or of any list that held every F1 item of pilot.json, was it.
+STALE_PILOT_WORDS = ("with no `--items`, or with any `--items` list that holds them all",
+                     "whose scope holds every F1 item of pilot.json", "or of every item")
+# The registered pilot run's scope (section 13 and the README), in the words both use.
+PILOT_SCOPE = ("is exactly the items of pilot.json, given with `--items` (`--items "
+               "data/v0.1/pilot.json`, or a list of exactly those item ids in any order)")
+
+
+def pilot_scope_reasons(data: Path) -> tuple[str, str]:
+    """The reasons the scorer gives on ``data`` (``scoring._pilot_reasons``) why a run of every
+    item, and a run of pilot.json's PEP items alone, are not the registered pilot run, on the
+    registered models and build."""
+    from asofbench import scoring
+
+    questions = {q["id"]: q for q in map(json.loads, (data / "questions.jsonl").read_text(
+        encoding="utf-8").splitlines())}
+    listed, _ = scoring._items(data / "pilot.json", questions)
+    families = tuple(sorted({q["family"] for q in questions.values()}))
+    models = dict(zip(("answering_model", "answering_settings", "construction_model",
+                       "embedding_model"), MODEL_FLAGS.values(), strict=True))
+    pep = frozenset(i for i in listed if questions[i]["corpus"] == "pep")
+    (every,), (alone,) = (scoring._pilot_reasons(listed, scoring.Scope(families, items=items),
+                                                 questions, scoring.pilot_systems(), models, [])
+                          for items in (None, pep))
+    return every, alone
+
+
+def decision_gaps(registration: str, readme: str, data: Path = ROOT / "data" / "v0.1") -> list[str]:
     """Where section 13 or the README does not give gates.json's ``decision`` for a pilot that is
     not evaluable as the scorer's one constructor of it (``scoring._not_evaluable``) writes it:
     "not evaluable: " and the reasons, then the scorer's sentence on the registered pilot run
     (``REGISTERED_PILOT``) and its sentence on the six pilot systems, each quoted as the code writes
-    it, all joined by "; "."""
+    it, all joined by "; ". Also where either does not say that the decision is a top-level field
+    in every shape, or define the registered pilot run's scope as exactly the items of pilot.json
+    given with --items (``PILOT_SCOPE``), so that a run of every item is never it; where section 13
+    does not quote the reasons the scorer gives on data/v0.1 for a run of every item and for a run
+    of pilot.json's PEP items (``pilot_scope_reasons``); and where either still gives the earlier
+    definition (``STALE_PILOT_WORDS``)."""
     from asofbench import scoring
 
     built = scoring._not_evaluable("accuracy_mean_over_runs", {}, {}, ["bm25"], [], {},
@@ -786,10 +842,23 @@ def decision_gaps(registration: str, readme: str) -> list[str]:
     assert head == "not evaluable: a reason" and parts[0] == "no H- F1 answers from bm25", built
     assert parts[1] == scoring.REGISTERED_PILOT, built
     places = {"section 13": registration_section(registration, 13), "README.md": readme}
-    return [f"{where} does not quote {phrase!r}" for where, text in places.items()
+    top = "in both shapes the decision is gates.json's top-level field `decision`"
+    gaps = [f"{where} does not quote {phrase!r}" for where, text in places.items()
             for phrase in ('"not evaluable: "', f'"{scoring.REGISTERED_PILOT}"', f'"{parts[2]}"',
-                           'all joined by "; "')
+                           'all joined by "; "', top, PILOT_SCOPE)
             if phrase not in text]
+    every, alone = pilot_scope_reasons(data)
+    for where, phrases in (
+        ("section 13", ("A run with no `--items`, which scores every item, is therefore never the "
+                        "registered pilot run", f'"{every}" in a run of every item',
+                        f'"{alone}" in a run of pilot.json\'s PEP items alone')),
+        ("README.md", ("A run of every item, the registered full run included, is never the "
+                       "registered pilot run",)),
+    ):
+        gaps += [f"{where} does not say {phrase!r}" for phrase in phrases
+                 if phrase not in places[where]]
+    return gaps + [f"{where} still says {word!r}" for where, text in places.items()
+                   for word in STALE_PILOT_WORDS if word in text]
 
 
 def test_the_registration_and_the_readme_give_the_decision_of_a_pilot_that_is_not_evaluable():
@@ -809,18 +878,30 @@ CC0_LEGAL_CODE_SHA256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c
 
 def test_the_licences_are_the_mit_licence_and_the_cc0_legal_code():
     """LICENSE-DATA is the CC0 1.0 legal code and nothing else, so that licence detectors recognise
-    it; the README says which files it covers, the published results among them; the package's
-    metadata names both licences and both files; and CITATION.cff, whose licence list the CFF
-    format reads as alternatives, names the dataset's licence alone and both in its abstract."""
+    it, and git converts the line endings of neither licence file (.gitattributes), so that a
+    checkout on any platform holds those bytes; the README says which files it covers, the
+    published results and every file published beside them, the label files included, among them;
+    the labelling guidelines say that annotators label on the understanding that their label files
+    are dedicated so; the package's metadata names both licences and both files; and CITATION.cff,
+    whose licence list the CFF format reads as alternatives, names the dataset's licence alone and
+    both in its abstract, with the same files."""
     data = (ROOT / "LICENSE-DATA").read_bytes()
     assert hashlib.sha256(data).hexdigest() == CC0_LEGAL_CODE_SHA256
     assert data.startswith(b"Creative Commons Legal Code\n\nCC0 1.0 Universal\n")
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "LICENSE -text" in attributes and "LICENSE-DATA -text" in attributes
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     licences = readme.split("\n## Data and licences\n", 1)[1].split("\n## ", 1)[0]
     assert "[LICENSE-DATA](LICENSE-DATA) holds the CC0 1.0 legal code" in licences
     assert "the published results of v0.1 (results.md, results.json and gates.json" in licences
+    assert "every file published beside the results report" in licences
+    assert "the label files included, other than the code and documents above" in licences
     assert "covers those files and no other file of this repository" in licences
     assert "TODO(author): confirm the data licence" not in readme
+    guidelines = (ROOT / "labelling" / "GUIDELINES.md").read_text(encoding="utf-8")
+    assert ("Annotators label on the understanding that the label files, notes included, are "
+            "dedicated to the public domain under CC0 1.0") in guidelines
+    assert "an annotator who does not agree does not label" in guidelines
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert (project["license"], project["license-files"]) == ("MIT AND CC0-1.0",
                                                               ["LICENSE", "LICENSE-DATA"])
@@ -828,6 +909,7 @@ def test_the_licences_are_the_mit_licence_and_the_cc0_legal_code():
     assert re.search(r"^license: CC0-1\.0$", citation, re.MULTILINE)
     abstract = re.search(r"^abstract: (.*)$", citation, re.MULTILINE).group(1)
     assert "CC0 1.0" in abstract and "MIT licence" in abstract and "published results" in abstract
+    assert "every file published beside the results report, the label files included" in abstract
 
 
 # The README's F1-recent counts by the training cutoff ("What the scores mean"), each as a pattern
@@ -1285,7 +1367,8 @@ def test_the_scorers_registered_build_is_data_v0_1():
 
 def listing_digest(files: dict[str, bytes]) -> str:
     """Section 15's SHA-256 over the source files, as documented: the SHA-256 of one line
-    ``<SHA-256 of the file>  <name>`` per file, in name order (what ``sha256sum *.py`` prints)."""
+    ``<SHA-256 of the file>  <name>`` per file, in the byte order of the names (what
+    ``LC_ALL=C sha256sum *.py`` prints)."""
     lines = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n"
                     for name, data in sorted(files.items()))
     return hashlib.sha256(lines.encode("utf-8")).hexdigest()

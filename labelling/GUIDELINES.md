@@ -27,7 +27,7 @@ Give each pair exactly one of six labels:
 
 ## Output
 
-Write one JSON object per line to `labels-<annotator>.jsonl`: `{"pair_id": "...", "label": "...", "note": "..."}`, with `note` empty when there is nothing to say. Do not quote the proposal texts in `note`, not even a few words: refer to a mention by its side and its place in the record, or say in your own words what the text states, since the label files are published and the proposal texts are not (pre-registration §12). Label independently; do not compare files until both are complete.
+Write one JSON object per line to `labels-<annotator>.jsonl`: `{"pair_id": "...", "label": "...", "note": "..."}`, with `note` empty when there is nothing to say. Do not quote the proposal texts in `note`, not even a few words: refer to a mention by its side and its place in the record, or say in your own words what the text states, since the label files are published and the proposal texts are not (pre-registration §12). Annotators label on the understanding that the label files, notes included, are dedicated to the public domain under CC0 1.0 (the legal code in LICENSE-DATA) when they are published; an annotator who does not agree does not label. Label independently; do not compare files until both are complete.
 
 ## Agreement and adjudication
 

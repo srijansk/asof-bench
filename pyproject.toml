@@ -1,5 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+# Pinned, so that the release artifacts built from a fresh clone of the tag do not depend on the backend the builder has.
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [project]

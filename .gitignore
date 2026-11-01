@@ -7,8 +7,7 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-# Corpus clones and built revision streams are regenerated from pinned commits, never committed.
-/cache/
+# Built revision streams are regenerated from the pinned clones, which live outside the checkout, and never committed.
 /streams/
 # The annotators' sheets hold proposal text: they stay local (asofbench labelling-sheet).
 labelling-sheet*.md

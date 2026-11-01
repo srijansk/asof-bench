@@ -212,7 +212,9 @@ def test_each_pilot_scenario_stops_at_its_gate(name, data, questions, gold, tmp_
     assert results["scope"]["items"] == 180 and results["scope"]["items_file"] == "pilot.json"
     assert results["scope"]["entries_file"] == "entries.json"
     # The same answers against the whole benchmark: the items they left out are wrong, so every
-    # score is lower, and the gates, which read the pilot items, do not move.
+    # score is lower. A run of every item is not the registered pilot run (section 13): its
+    # gates.json records the same computation on the pilot items, with the reason, and decides
+    # nothing.
     whole = tmp_path / "oracle"
     everything = score(data, answers, whole)
     full = {(r["system"], r["stratum"], r["corpus"]): r for r in everything["results"]
@@ -222,7 +224,17 @@ def test_each_pilot_scenario_stops_at_its_gate(name, data, questions, gold, tmp_
     for key, small in mine.items():
         assert full[key]["n_items"] > small["n_items"]
         assert full[key]["accuracy_mean_over_runs"] < small["accuracy_mean_over_runs"] + 1e-12
-    assert read_gates(whole) == gates
+    beside = len(questions) - len(json.loads((data / "pilot.json").read_text(encoding="utf-8"))[
+        "ids"])
+    assert beside == 725  # the 905 items less pilot.json's 180
+    every = read_gates(whole)
+    assert (every["evaluable"], every["reasons"]) == (False, [
+        f"the run's scope is every item (no --items), which holds {beside} items that pilot.json "
+        "does not list"])
+    assert "stopped_at" not in every and "signal" not in every
+    assert every["decision"].startswith("not evaluable: the run's scope is every item")
+    for key in ("accuracy_change", "accuracy_current"):
+        assert every["detail"][key] == gates["detail"][key], key
     # With the pilot list but the default entries, the six systems are also entered in the
     # arms they never answered (H+ and CF): zero there, rows present, and the arms are named.
     wide = tmp_path / "wide"

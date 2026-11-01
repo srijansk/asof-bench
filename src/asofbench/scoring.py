@@ -101,13 +101,17 @@ more items than the reverse, below when the adjusted p is below 0.05 and the rev
 otherwise shows no detectable difference: the verdict follows the majority results the test
 compares, and a visible line says when the accuracy averaged over the runs differs the other way,
 or not at all. The verdict is a ``claim`` only in the registered full run, which scores every item
-(no ``--items``) of the registered build, makes all 14 comparisons, and is answered by the
-registered answering model with the registered settings over stores the registered construction
-model built, with text the registered embedding model embedded; any other run gives its
-comparisons as a ``reading``, and ``results.json`` says which run it is (``headline.registered``)
-and why not (``headline.not_registered``). Each comparison also gives the share of items by which
-the majority results lead (``majority_difference``) and the runs each side answered, and a
-visible line names every side that left runs out, since a missing run is wrong. The corpora
+(no ``--items``) of the registered build with the registered entries (no entries file, or one
+that only declares outside entries), makes all 14 comparisons with grep at D and each compared
+system answering every compared item in runs 1, 2 and 3, and is answered by the registered
+answering model with the registered settings over stores the registered construction model
+built, with text the registered embedding model embedded; any other run gives its comparisons as
+a ``reading``, and ``results.json`` says which run it is (``headline.registered``) and why not
+(``headline.not_registered``: each registered system an entries file narrows, each comparison
+not made, and each side and corpus that left a run out, among the other conditions). Each
+comparison also gives the share of items by which the majority results lead
+(``majority_difference``) and the runs each side answered, and a visible line names every side
+that left runs out, since a missing run is wrong. The corpora
 pooled are reported descriptively. The same comparisons on the items without a header-only
 episode after their date, and, given the message cues, on those that no kept message names, are
 reported beside it, each made only where both sides have a scored answer to the items left in
@@ -150,14 +154,16 @@ test is two-sided, against the better of grep at D and long context (against eac
 gate 4 counts the ten pairs of pilot systems without closed book, with their p-values
 Holm-adjusted, and keeps the unadjusted reading over all fifteen pairs beside it. The pilot's
 Graphiti is graphiti or, under M0's fallback, graphiti-reduced (``pilot_systems``). The gates
-decide only in the registered pilot run, whose scope holds every F1 item of ``pilot.json`` with
-every pilot system entered in H- F1, on the registered build, and whose answers the registered
+decide only in the registered pilot run, whose scope, given with ``--items``, is exactly the
+items of ``pilot.json`` (so a run of every item never decides them), with every pilot system
+entered in H- F1, on the registered build, and whose answers the registered
 answering model gave with the registered settings over stores the registered construction model
 built, with text the registered embedding model embedded, and only when all six pilot systems
 have answers there; an item a present system did not answer is wrong, and the coverage of the
 pilot items in the run's scope is reported in ``gates.json``. Otherwise the result is "not
 evaluable" (``_not_evaluable``, its one constructor): ``evaluable`` is false, ``reasons`` says
-why, every gate's computation is kept, and there is no ``stopped_at`` or ``signal``.
+why, every gate's computation is kept, and there is no ``stopped_at`` or ``signal``. In both
+shapes ``gates.json`` gives its ``decision`` as a top-level field.
 ``results.json``'s ``pilot`` gives ``reasons`` in every shape, that of a build without a pilot
 list included.
 """
@@ -735,7 +741,8 @@ def _not_evaluable(measure, change, current, missing_systems, missing_inputs, ga
     is written: ``evaluable`` false; ``reasons``, every reason why (the run's own when it is not
     the registered pilot run, ``reasons``, then the pilot systems without answers,
     ``missing_systems``, or else the inputs a gate lacks, ``missing_inputs``); a ``decision`` that
-    says it is not evaluable and why; and each gate's computation (``gates``) without its
+    says it is not evaluable and why, a top-level field as a decided pilot's is (``pilot_gates``);
+    and each gate's computation (``gates``) without its
     ``stop`` or ``signal``. There is no ``stopped_at`` or ``signal``, at the top or in any gate,
     which would read as a decision."""
     why = list(reasons)
@@ -776,8 +783,9 @@ def pilot_gates(
     The gates are evaluated only when all six have answers, and each gate only when its inputs
     are there (the engines' F1-current rows for gate 2, each item's majority result for gates 3
     and 4); otherwise the pilot is "not evaluable" and the result names what is missing and has
-    no ``stopped_at`` or ``signal``. A decided pilot returns ``{"evaluable": True, "stopped_at":
-    1 | 2 | 3 | None, "signal": bool, "detail": {...}}``.
+    no ``stopped_at`` or ``signal``. A decided pilot returns ``{"evaluable": True, "decision":
+    str, "stopped_at": 1 | 2 | 3 | None, "signal": bool, "detail": {...}}``: in both shapes the
+    ``decision`` is a top-level field.
     """
     systems = pilot_systems(graphiti)
     pooled = _pooled(rows, measure, systems)
@@ -804,6 +812,7 @@ def pilot_gates(
         decision = DECISIONS["signal" if gates["gate4"]["signal"] else "null"]
     return {
         "evaluable": True,
+        "decision": decision,  # a top-level field, as in _not_evaluable's shape (section 13)
         "stopped_at": stopped,
         "signal": stopped is None and gates["gate4"]["signal"],
         "detail": {
@@ -811,7 +820,6 @@ def pilot_gates(
             "accuracy_change": change,
             "accuracy_current": current,
             **gates,
-            "decision": decision,
         },
     }
 
@@ -1723,9 +1731,9 @@ def _claimed(comparisons: list[dict], key: str = "claim") -> list[dict]:
 def _has_scored_answer(cells: dict, system: str, corpus: str, ids: list[str]) -> bool:
     """Whether ``system`` has a scored answer, in any of runs 1, 2 and 3, to one of ``ids``, its
     H- F1-change items of ``corpus``: a row in the scope and the system's entries, on a registered
-    run label, and the first for its run (``_answers`` sets the others aside)."""
-    group = cells.get((system, *HEADLINE_GROUP, corpus), {})
-    return any(group.get(item_id) for item_id in ids)
+    run label, and the first for its run (``_answers`` sets the others aside), the runs that
+    ``_runs_answered`` counts."""
+    return _runs_answered(cells, system, corpus, ids) > 0
 
 
 def _headline_plan(cells: dict, questions: dict[str, dict], scope: Scope,
@@ -1735,7 +1743,10 @@ def _headline_plan(cells: dict, questions: dict[str, dict], scope: Scope,
     F1-change items in the run's scope (``ids``), the comparisons ``made``, and those ``not_made``
     with why. A comparison is made only when the corpus has such items and both grep at D and the
     system are entered in H- F1 and have a scored answer to one of them (``_has_scored_answer``);
-    grep at D's cause, found first, is the cause of every comparison on that corpus."""
+    grep at D's cause, found first, is the cause of every comparison on that corpus. ``incomplete``
+    is each side of a comparison made, grep at D first on each corpus and then each compared
+    system, whose scored answers leave out a run of the corpus's compared items (``_runs_answered``
+    against three runs per item), with the runs it answered: the registered full run has none."""
     arm, family, stratum = HEADLINE_GROUP
     compared = _with_graphiti(HEADLINE_SYSTEMS, graphiti)
     ids = {corpus: sorted(i for i, q in questions.items()
@@ -1761,7 +1772,18 @@ def _headline_plan(cells: dict, questions: dict[str, dict], scope: Scope,
                 made.append((system, corpus))
             else:
                 not_made.append({"system": system, "corpus": corpus, "reason": reason})
-    return {"compared": compared, "ids": ids, "made": made, "not_made": not_made}
+    incomplete = []
+    for corpus in CORPORA:
+        sides = [system for system, where in made if where == corpus]
+        if not sides:
+            continue  # no comparison is made on the corpus, so no side of one can be incomplete
+        for system in (HEADLINE_BASELINE, *sides):
+            answered = _runs_answered(cells, system, corpus, ids[corpus])
+            if answered < len(RUNS) * len(ids[corpus]):
+                incomplete.append({"system": system, "corpus": corpus, "runs_answered": answered,
+                                   "items": len(ids[corpus])})
+    return {"compared": compared, "ids": ids, "made": made, "not_made": not_made,
+            "incomplete": incomplete}
 
 
 def _headline(cells: dict, gold: dict[str, dict], plan: dict, cue_items: list[dict] | None,
@@ -1898,24 +1920,60 @@ def _build_reasons(data: Path) -> list[str]:
     return [f"the build is not the registered one: {', and '.join(parts)}"] if parts else []
 
 
-def _registration_reasons(scope: dict, not_made: list[dict], models: dict, build: list[str],
+def _narrowed(scope: Scope) -> list[dict]:
+    """Each registered system (section 11) that the entries file enters in fewer arms or families
+    than its registered entries (``Scope.entry`` without the file), with the arms and the
+    families it narrows it to (None for whichever it leaves as registered). The registered full
+    run uses the registered entries (section 12): an entries file that only declares outside
+    entries keeps it, and one that narrows any registered system does not."""
+    found = []
+    for system in sorted(scope.declared):
+        if system not in REGISTERED_SYSTEMS:
+            continue  # an outside entry
+        arms, families = scope.declared[system]
+        default = scope.default_families(system)
+        if arms != frozenset(ARMS) or families != default:
+            found.append({"system": system,
+                          "arms": None if arms == frozenset(ARMS) else sorted(arms),
+                          "families": None if families == default else sorted(families)})
+    return found
+
+
+def _narrowed_words(system: str, arms: list[str] | None, families: list[str] | None) -> str:
+    """What an entries file narrows ``system`` (as the caller names it) to, in words."""
+    parts = [f"the {one if len(names) == 1 else several} {_listed_words(names)}"
+             for names, one, several in ((arms, "arm", "arms"), (families, "family", "families"))
+             if names]
+    return f"the entries file narrows {system} to {' in '.join(parts)}"
+
+
+def _registration_reasons(scope: dict, narrowed: list[dict], not_made: list[dict],
+                          incomplete: list[dict], models: dict, build: list[str],
                           name=lambda system: system) -> list[str]:
     """Why the run is not the registered full run (section 12), each condition it does not meet
-    in words; empty for the registered full run, which scores every item (no ``--items``), makes
-    all ``HEADLINE_FAMILY`` comparisons, and was answered by ``REGISTERED_ANSWERING_MODEL`` with
-    ``REGISTERED_ANSWERING_SETTINGS`` over stores ``REGISTERED_CONSTRUCTION_MODEL`` built, with
-    text ``REGISTERED_EMBEDDING_MODEL`` embedded, on the registered build. ``scope`` is the
-    report's (its ``items`` and ``items_file``), ``not_made`` the comparisons not made
-    (``_headline_plan``), one reason per cause, ``models`` holds the models and settings, and
-    ``build`` is ``_build_reasons``'s list. ``name`` writes a system's name, so that results.md can
-    label it as its tables do while results.json keeps the id."""
+    in words; empty for the registered full run, which scores every item (no ``--items``) with the
+    registered entries, makes all ``HEADLINE_FAMILY`` comparisons with grep at D and each compared
+    system answering every compared item in runs 1, 2 and 3, and was answered by
+    ``REGISTERED_ANSWERING_MODEL`` with ``REGISTERED_ANSWERING_SETTINGS`` over stores
+    ``REGISTERED_CONSTRUCTION_MODEL`` built, with text ``REGISTERED_EMBEDDING_MODEL`` embedded, on
+    the registered build. ``scope`` is the report's (its ``items`` and ``items_file``),
+    ``narrowed`` the registered systems an entries file narrows (``_narrowed``), one reason each,
+    ``not_made`` the comparisons not made, one reason per cause, and ``incomplete`` the sides of
+    the comparisons made that leave a run out, one reason per side and corpus (both from
+    ``_headline_plan``), ``models`` holds the models and settings, and ``build`` is
+    ``_build_reasons``'s list. ``name`` writes a system's name, so that results.md can label it as
+    its tables do while results.json keeps the id."""
     reasons = []
     if scope["items"] is not None:
         reasons.append(f"the run's scope is {_scope_words(scope)}, given with --items")
+    reasons += [_narrowed_words(name(entry["system"]), entry["arms"], entry["families"])
+                for entry in narrowed]
     for reason, corpora, systems in _not_made_groups(not_made):
         names = [name(system) for system in systems]
         reasons.append(f"{_listed_words(names)} {'is' if len(names) == 1 else 'are'} not compared "
                        f"on {_listed_words(list(corpora), 'or')} ({reason})")
+    reasons += [_answered_words(name(side["system"]), side["runs_answered"], side["items"],
+                                side["corpus"]) for side in incomplete]
     return reasons + _model_reasons(models) + list(build)
 
 
@@ -1971,19 +2029,30 @@ def _entered_in(scope: Scope, system: str, arm: str, family: str) -> bool:
     return arm in arms and family in families
 
 
-def _pilot_reasons(wanted: list[str], scope: Scope, systems: tuple[str, ...], models: dict,
-                   build: list[str]) -> list[str]:
+def _pilot_reasons(listed: frozenset[str], scope: Scope, questions: dict[str, dict],
+                   systems: tuple[str, ...], models: dict, build: list[str]) -> list[str]:
     """Why the run is not the registered pilot run (section 13), each condition it does not meet
-    in words; empty for the registered pilot run, whose scope holds every F1 item of pilot.json
-    (``wanted``), which the gates read in H- for each pilot system, whose answers
+    in words; empty for the registered pilot run, whose scope, given with ``--items``, is exactly
+    the items of pilot.json (``listed``, the ids ``--items`` reads from it, in any order), whose
+    entries leave no pilot system out of H- F1, which the gates read, whose answers
     ``REGISTERED_ANSWERING_MODEL`` gave with ``REGISTERED_ANSWERING_SETTINGS`` over stores
     ``REGISTERED_CONSTRUCTION_MODEL`` built, with text ``REGISTERED_EMBEDDING_MODEL`` embedded,
-    and whose build is the registered one (``build`` is ``_build_reasons``'s list)."""
+    and whose build is the registered one (``build`` is ``_build_reasons``'s list). A run with no
+    ``--items`` scores every item of ``questions`` and is never the registered pilot run, so a
+    full run never decides the gates."""
     reasons = []
-    if scope.items is not None:
-        left = sum(1 for item_id in wanted if item_id not in scope.items)
+    holds = "that pilot.json does not list"
+    if scope.items is None:
+        beside = len(set(questions) - listed)
+        reasons.append("the run's scope is every item (no --items)"
+                       + (f", which holds {_counted(beside, 'item')} {holds}" if beside else ""))
+    else:
+        left = len(listed - scope.items)
         if left:
             reasons.append(f"the run's scope leaves out {_counted(left, 'pilot item')}")
+        beside = len(scope.items - listed)
+        if beside:
+            reasons.append(f"the run's scope holds {_counted(beside, 'item')} {holds}")
     out = [s for s in systems if not _entered_in(scope, s, "H-", "F1")]
     if out:
         reasons.append(f"the entries file leaves {_listed_words(out)} out of H- F1, which the "
@@ -1991,9 +2060,9 @@ def _pilot_reasons(wanted: list[str], scope: Scope, systems: tuple[str, ...], mo
     return reasons + _model_reasons(models) + list(build)
 
 
-REGISTERED_PILOT = ("the gates decide only in the registered pilot run, whose scope holds every F1 "
-                    "item of pilot.json, for every pilot system, on the registered build, and "
-                    f"whose answers {REGISTERED_ANSWERING_MODEL} gave with "
+REGISTERED_PILOT = ("the gates decide only in the registered pilot run, whose scope is exactly the "
+                    "items of pilot.json, given with --items, for every pilot system, on the "
+                    f"registered build, and whose answers {REGISTERED_ANSWERING_MODEL} gave with "
                     f"{REGISTERED_ANSWERING_SETTINGS}, over stores {REGISTERED_CONSTRUCTION_MODEL} "
                     f"built, with text embedded by {REGISTERED_EMBEDDING_MODEL}")
 
@@ -2054,7 +2123,9 @@ def _pilot(data: Path, scored: list[dict], questions: dict[str, dict], scope: Sc
         {s: {"H-": [item for item in items[s] if item[2] == "change"]} for s in present},
     )
     gates = pilot_gates(pooled, per_item, graphiti=graphiti)
-    reasons = _pilot_reasons(wanted, scope, systems, models, build)
+    # The ids that --items reads from pilot.json: the registered pilot run's scope is exactly them.
+    listed, _ = _items(path, questions)
+    reasons = _pilot_reasons(listed, scope, questions, systems, models, build)
     if reasons or not gates["evaluable"]:
         # Not the registered pilot run, or not decidable on its answers: the missing systems are
         # those of the scope, and a gate's missing inputs count only when every system answered.
@@ -2199,15 +2270,23 @@ def _direction_lines(report: dict, comparisons: list[dict], key: str) -> list[st
     return out
 
 
+def _answered_words(system: str, answered: int, items: int, corpus: str) -> str:
+    """How many of the three runs of each of ``items`` compared items of ``corpus`` ``system``
+    (as the caller names it) answered, in words: a reason why a run is not the registered full
+    run (``_registration_reasons``) and a line under the headline's tables
+    (``_shortfall_lines``)."""
+    return (f"{system} answered {answered} of the {_counted(len(RUNS) * items, 'run')} on the "
+            f"{_counted(items, f'compared {corpus} item')}")
+
+
 def _shortfall_lines(report: dict, comparisons: list[dict]) -> list[str]:
     """For grep at D on each corpus, and for each compared system, that left runs out of the
     compared items, a line giving the runs it answered out of three per item: a missing run is
     wrong, so the comparison reads it as a wrong answer. Systems are named as the tables name
     them (``_name``)."""
     def line(system: str, answered: int, items: int, corpus: str) -> str:
-        return (f"- {_name(report, system)} answered {answered} of the "
-                f"{_counted(len(RUNS) * items, 'run')} on the "
-                f"{_counted(items, f'compared {corpus} item')}; a missing run counts as wrong.")
+        return (f"- {_answered_words(_name(report, system), answered, items, corpus)}; a missing "
+                "run counts as wrong.")
 
     out = []
     for corpus in CORPORA:
@@ -2229,9 +2308,11 @@ def _not_made_lines(report: dict, not_made: list[dict]) -> list[str]:
 
 
 REGISTERED_RUN = ("scores every item (no --items) of the registered build (data/v0.1's "
-                  "questions.jsonl, gold.jsonl and pilot.json), makes all "
-                  f"{HEADLINE_FAMILY} registered comparisons, each compared system and grep at D "
-                  "having a scored answer on each corpus's H- F1-change items, and is answered by "
+                  "questions.jsonl, gold.jsonl and pilot.json) with the registered entries (no "
+                  "entries file, or one that only declares outside entries), makes all "
+                  f"{HEADLINE_FAMILY} registered comparisons, grep at D and each compared system "
+                  "having a scored answer to every H- F1-change item of each corpus in runs "
+                  f"{_listed_words(list(RUNS))}, and is answered by "
                   f"{REGISTERED_ANSWERING_MODEL} with {REGISTERED_ANSWERING_SETTINGS}, over stores "
                   f"{REGISTERED_CONSTRUCTION_MODEL} built, with text embedded by "
                   f"{REGISTERED_EMBEDDING_MODEL}")
@@ -2246,8 +2327,9 @@ def _headline_lead(report: dict) -> tuple[str, str]:
     if found["registered"]:
         return ("The registered headline (section 12). This is the registered full run, which "
                 f"{REGISTERED_RUN}.", "claim")
-    reasons = _registration_reasons(report["scope"], found["not_made"], report,
-                                    report["build_reasons"], lambda system: _name(report, system))
+    reasons = _registration_reasons(report["scope"], report["narrowed"], found["not_made"],
+                                    report["incomplete"], report, report["build_reasons"],
+                                    lambda system: _name(report, system))
     return ("This run is not the registered full run, so its comparisons give readings, not "
             f"claims (section 12): {'; '.join(reasons)}. The registered full run "
             f"{REGISTERED_RUN}.", "reading")
@@ -2599,9 +2681,10 @@ def _pilot_section(report: dict) -> list[str]:
                 "", f"The gates decide only in the registered pilot run, and only when all six "
                     f"pilot systems ({names}; under M0's fallback, section 13, graphiti-reduced "
                     f"takes graphiti's place) have H- answers to the pilot items: the registered "
-                    f"pilot run's scope holds every F1 item of pilot.json, which the gates read "
-                    f"in H-, with every pilot system entered in H- F1; its build is the "
-                    f"registered one, data/v0.1; and its answers are "
+                    f"pilot run's scope is exactly the items of pilot.json, given with --items, "
+                    f"whose F1 items the gates read in H-, with every pilot system entered in H- "
+                    f"F1, so a run with no --items, which scores every item, never decides; its "
+                    f"build is the registered one, data/v0.1; and its answers are "
                     f"{REGISTERED_ANSWERING_MODEL}'s, with {REGISTERED_ANSWERING_SETTINGS}, over "
                     f"stores {REGISTERED_CONSTRUCTION_MODEL} built, with text embedded by "
                     f"{REGISTERED_EMBEDDING_MODEL}."]
@@ -2611,7 +2694,7 @@ def _pilot_section(report: dict) -> list[str]:
     else:
         detail = gates["detail"]
         outcome = _outcome(gates["stopped_at"], gates["signal"])
-        out.append(f'{outcome[0].upper()}{outcome[1:]}. The decision is "{detail["decision"]}".')
+        out.append(f'{outcome[0].upper()}{outcome[1:]}. The decision is "{gates["decision"]}".')
         other = detail["by_majority_accuracy"]
         reading = (_outcome(other["stopped_at"], other["signal"]) if other["evaluable"]
                    else f"the pilot is {other['decision']}")
@@ -2808,8 +2891,10 @@ def main(args) -> int:
                    "items_file": scope.items_file}
     # Section 12: only the registered full run makes claims; any other run says why it is not.
     plan = _headline_plan(cells, questions, scope, graphiti)
+    narrowed = _narrowed(scope)
     headline = _headline(cells, gold, plan, None if cues is None else cue_items,
-                         _registration_reasons(scope_words, plan["not_made"], models, build))
+                         _registration_reasons(scope_words, narrowed, plan["not_made"],
+                                               plan["incomplete"], models, build))
     coverage = _coverage(results, scored)
     answered = {(r["system"], r["arm"]) for r in scored}
     contamination = _contamination(gold, scored, denominators)
@@ -2876,7 +2961,8 @@ def main(args) -> int:
     # results.md also reads the gates and the system ids it names with their labels (_name),
     # which results.json keeps as ids.
     _write(out / "results.md", _markdown({**report, "gates": gates, "silent": silent,
-                                          "build_reasons": build}))
+                                          "build_reasons": build, "narrowed": narrowed,
+                                          "incomplete": plan["incomplete"]}))
     gates_file = out / "gates.json"
     if gates is not None:
         _write(gates_file, dumps({"canary": CANARY, **models, **gates}) + "\n")

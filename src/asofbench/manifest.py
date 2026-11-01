@@ -11,11 +11,13 @@ with its price basis, null until they are set (section 13).
 **Provenance.** The generator's source is the ``*.py`` files of its package directory
 (``src/asofbench`` in a checkout), regular files only: a ``*.py`` entry that is a symbolic link
 or not a regular file stops the build with a message. Their digest,
-``source_sha256``, is the SHA-256 of one line ``<SHA-256 of the file>  <name>`` per file in name
-order, which is what ``sha256sum *.py`` prints in that directory. ``source_commit`` is the commit
-HEAD names when the checkout is the top level of its own repository and those files are, name for
-name and byte for byte, the ones HEAD holds; otherwise it is ``"uncommitted"`` and
-``source_dirty`` is true. Other files, such as a build's output, do not count.
+``source_sha256``, is the SHA-256 of one line ``<SHA-256 of the file>  <name>`` per file in the
+byte order of the names, which is what ``LC_ALL=C sha256sum *.py`` prints in that directory (the
+order of a shell's glob follows its collation, so another locale can give another order).
+``source_commit`` is the commit HEAD names when the checkout is the top level of its own
+repository and those files are, name for name and byte for byte, the ones HEAD holds; otherwise
+it is ``"uncommitted"`` and ``source_dirty`` is true. Other files, such as a build's output, do
+not count.
 """
 
 from __future__ import annotations

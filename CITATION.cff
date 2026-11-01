@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: If you use asof-bench, please cite it as below.
-title: "asof-bench: what did a project decide, as of date D?"
+title: "asof-bench: what did a project decide, as of a given date?"
 type: dataset
 version: prereg-v0.1.2
 authors:

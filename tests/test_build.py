@@ -278,6 +278,20 @@ def registration_section(text: str, number: int) -> str:
     return text.split(f"\n## {number}. ", 1)[1].split("\n## ", 1)[0]
 
 
+# The documents that explain the registration: the README, the front page, and the pages of docs/
+# it sends a reader to. The document tests below read them as one text, in this order, so that a
+# rule they state is checked wherever it now lives; the score commands and the lines quoted from
+# results.md are in docs/scoring.md alone.
+DOCUMENTS = ("README.md", "docs/design.md", "docs/rebuilding.md", "docs/entering-a-system.md",
+             "docs/scoring.md", "docs/limitations.md", "docs/data-and-licences.md",
+             "docs/data-format.md", "docs/code-map.md", "docs/glossary.md")
+
+
+def documents() -> str:
+    """The README and the pages of docs/ (``DOCUMENTS``), joined in order."""
+    return "\n".join((ROOT / name).read_text(encoding="utf-8") for name in DOCUMENTS)
+
+
 # The options of ``asofbench score`` that the registration does not name: the command's plumbing
 # (its help, the build it reads, the answer files and the output directory), which carries no
 # registered value. Every other option of the command must be named.
@@ -386,7 +400,7 @@ def test_the_registration_names_the_outputs_the_files_beside_each_stream_and_the
 
 
 # The headline's claim rule (section 12, scoring._claimed) in the words that section 1, section 12
-# and the README use for it: the direction comes from the majority results the McNemar test
+# and the documents use for it: the direction comes from the majority results the McNemar test
 # compares, not from the accuracy averaged over the runs.
 CLAIM_RULE = "it is right where grep at D is wrong on more items than the reverse"
 FAMILY_ORDER = ("F1", "F2", "F3", "F4", "F5", "CF")  # section 7's order
@@ -403,7 +417,7 @@ STALE_HEADLINE_WORDS = ("over every comparison the run makes",
 
 
 def headline_rule_gaps(registration: str, readme: str) -> list[str]:
-    """Where the registration's sections 1 and 12 or the README no longer state the headline's
+    """Where the registration's sections 1 and 12 or the documents no longer state the headline's
     rule: the claim's direction from the majority results; Holm over the registered family of
     ``HEADLINE_FAMILY`` comparisons, a comparison not made counting as p = 1, with what that
     guarantees (leaving systems out never lowers a remaining adjusted p); each reading's own Holm
@@ -411,13 +425,13 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
     run, whose rows alone carry a claim, which uses the registered entries (no entries file, or
     one that narrows no registered system) and needs grep at D and each compared system to answer
     every compared item in runs 1, 2 and 3, each unmet condition named, as the scorer words it, in
-    section 12 and the README's examples. Also where any of them still uses the old family or
+    section 12 and the documents' examples. Also where any of them still uses the old family or
     claims invariance (``STALE_HEADLINE_WORDS``), and where section 12's default entries leave out
     a system that is entered in fewer families by default (scoring.REGISTERED_FAMILIES)."""
     from asofbench import scoring
 
     places = {"section 1": registration_section(registration, 1),
-              "section 12": registration_section(registration, 12), "README.md": readme}
+              "section 12": registration_section(registration, 12), "the documents": readme}
     # The scorer's own reasons for a run whose entries file narrows a registered system and for a
     # side that leaves runs out (scoring._narrowed_words, scoring._answered_words), as the two
     # documents quote them.
@@ -444,7 +458,7 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
                         f"have a scored answer, as above, to every H{chr(0x2212)} F1-change "
                         "item of both corpora in runs 1, 2 and 3", "before the headline's table",
                         *examples)),
-        ("README.md", (f"**Correction**: Holm, over the {family}",
+        ("the documents", (f"**Correction**: Holm, over the {family}",
                        "a comparison the run does not make counts as p = 1", never_lowers,
                        f"each Holm-adjusted on its own over the {family}",
                        "both have at least one scored answer", "Only its rows carry `claim`",
@@ -477,16 +491,16 @@ def headline_rule_gaps(registration: str, readme: str) -> list[str]:
 
 def test_the_registration_and_the_readme_state_the_headline_rule():
     # The rule the headline exists to apply is stated the same way in section 1, section 12 and
-    # the README, and the default entries name every system entered in fewer families.
+    # the documents, and the default entries name every system entered in fewer families.
     registration = (ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     assert headline_rule_gaps(registration, readme) == []
 
 
-# The README's statement of how large a difference the headline's reading without header-only
-# items can show on Ethereum (Known limitations), each part as a pattern of its own words: the
-# necessary condition with the pairs it names, Holm's multiplier, the fewest items one way by
-# Holm place, and the closing sentence.
+# The documents' statement of how large a difference the headline's reading without header-only
+# items can show on Ethereum (Known limitations, docs/limitations.md), each part as a pattern of
+# its own words: the necessary condition with the pairs it names, Holm's multiplier, the fewest
+# items one way by Holm place, and the closing sentence.
 POWER = (
     r"On (\d+) items the exact McNemar test gives p below 0\.05 only when at least (\d+) more of "
     r"them are right for one system and wrong for the other than the reverse, and not always "
@@ -527,8 +541,8 @@ def power_numbers(data: Path) -> dict:
 
 
 def power_gaps(readme: str, data: Path) -> list[tuple]:
-    """Each part of ``POWER`` that the README does not state as the data and the scorer's test
-    and correction give it: (part, what the README says, what holds)."""
+    """Each part of ``POWER`` that the documents do not state as the data and the scorer's test
+    and correction give it: (part, what the documents say, what holds)."""
     held = power_numbers(data)
     n, m, lead, need = held["n"], held["m"], held["lead"], held["need"]
     firsts: dict[int, int] = {}
@@ -561,11 +575,12 @@ def power_gaps(readme: str, data: Path) -> list[tuple]:
     return gaps
 
 
-# The network rule (sections 8 and 11, and the README's step 2) in its egress form, phrase by
-# phrase: the routes out it allows (the answering model's API, and the construction model's for a
-# system whose store a language model builds), the embedding model inside the environment and no
-# reranking model, the services a system runs itself, the files of this repository and the
-# sources out of reach, the provider-side tools and the committed record of the policy.
+# The network rule (sections 8 and 11, and step 2 of docs/entering-a-system.md) in its egress
+# form, phrase by phrase: the routes out it allows (the answering model's API, and the
+# construction model's for a system whose store a language model builds), the embedding model
+# inside the environment and no reranking model, the services a system runs itself, the files of
+# this repository and the sources out of reach, the provider-side tools and the committed record
+# of the policy.
 NETWORK_RULE = (
     "in an environment from which no network route leads out except to the answering model's "
     "API",
@@ -589,10 +604,10 @@ STALE_NETWORK_WORDS = ("no network access except", "the embedding model's API",
 
 
 def network_rule_gaps(registration: str, readme: str) -> list[str]:
-    """Where sections 8 and 11 or the README do not state the network rule in its egress form, or
+    """Where sections 8 and 11 or the documents do not state the network rule in its egress form, or
     still state it in an earlier form (``STALE_NETWORK_WORDS``)."""
     places = {"section 8": registration_section(registration, 8),
-              "section 11": registration_section(registration, 11), "README.md": readme}
+              "section 11": registration_section(registration, 11), "the documents": readme}
     gaps = [f"{where}: {phrase}" for where, text in places.items() for phrase in NETWORK_RULE
             if phrase not in text]
     return gaps + [f"{where}: still says {word!r}" for where, text in places.items()
@@ -601,20 +616,24 @@ def network_rule_gaps(registration: str, readme: str) -> list[str]:
 
 def test_the_registration_and_the_readme_state_the_network_rule_as_egress():
     registration = (ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     assert network_rule_gaps(registration, readme) == []
 
 
 def test_the_readme_rebuilds_with_the_registered_budget_and_its_price_basis():
-    """The README's rebuild command gives the Graphiti budget and the price basis that
+    """The rebuild command of docs/rebuilding.md gives the Graphiti budget and the price basis that
     data/v0.1/MANIFEST.json records (section 13), so that it reproduces the registered manifest;
-    every Graphiti budget the README and the registration state in US dollars is that one; and
+    every Graphiti budget the documents and the registration state in US dollars is that one; and
     every date they give the list prices on is the basis's, the day the budget was set (section
     15's copy of the manifest, which the freeze replaces, aside)."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     registration = (ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
     manifest = json.loads((ROOT / "data" / "v0.1" / "MANIFEST.json").read_text(encoding="utf-8"))
-    command = re.search(r"uv run asofbench build .*?(?=\n```)", readme, re.DOTALL).group(0)
+    # The command that reproduces the registered manifest builds the streams too
+    # (docs/rebuilding.md); the README's quick start rebuilds the data files alone, and so passes
+    # neither flag.
+    command = re.search(r"uv run asofbench build [^`]*?--streams .*?(?=\n```)", readme,
+                        re.DOTALL).group(0)
     budget = re.search(r"--graphiti-budget-usd (\S+)", command).group(1)
     basis = re.search(r"--price-basis '([^']*)'", command).group(1)
     assert (float(budget), basis) == (manifest["graphiti_budget_usd"],
@@ -639,9 +658,9 @@ SENSITIVITY_MODEL = "claude-sonnet-5-5"  # section 11: the answering model of th
 
 
 def readme_score_commands(readme: str) -> list[dict[str, str]]:
-    """Each ``asofbench score`` command the README gives, as its options and their values: those in
-    its bash blocks, continuation lines joined, then those it gives inline, as the sensitivity
-    check's options are (an inline span counts when it gives every model flag)."""
+    """Each ``asofbench score`` command the documents give, as its options and their values: those
+    in their bash blocks, continuation lines joined, then those they give inline, as the
+    sensitivity check's options are (an inline span counts when it gives every model flag)."""
     commands = []
     lines = [line for block in re.findall(r"```bash\n(.*?)\n```", readme, re.DOTALL)
              for line in block.replace("\\\n", " ").splitlines() if "asofbench score " in line]
@@ -664,11 +683,11 @@ ALLOWED_MODEL_VALUES = {
 
 
 def registered_model_gaps(registration: str, readme: str) -> list[str]:
-    """Where section 11 or the README's score commands do not give the registered values of the
+    """Where section 11 or the documents' score commands do not give the registered values of the
     four model flags: section 11 names each flag with its value, as the scored runs give it; every
-    value that the registration or the README gives a model flag, and every answering settings the
-    README quotes, is a registered one (or none, the sensitivity check's model or a placeholder);
-    the README's registered full run, its first command, gives all four; every README command
+    value that the registration or the documents give a model flag, and every answering settings the
+    documents quote, is a registered one (or none, the sensitivity check's model or a placeholder);
+    the documents' registered full run, their first command, gives all four; every such command
     gives the registered answering settings, and a construction or embedding model that is the
     registered one or none; the sensitivity check gives its own answering model and the
     registered three others; and the registered full run and the sensitivity check both give the
@@ -680,7 +699,7 @@ def registered_model_gaps(registration: str, readme: str) -> list[str]:
         written = f'`{flag} "{value}"`' if " " in value else f"`{flag} {value}`"
         if written not in section:
             gaps.append(f"section 11 does not give {written}")
-    for where, text in (("PREREGISTRATION.md", registration), ("README.md", readme)):
+    for where, text in (("PREREGISTRATION.md", registration), ("the documents", readme)):
         for flag, allowed in ALLOWED_MODEL_VALUES.items():
             for quoted, bare in re.findall(rf'{flag} (?:"([^"]*)"|([^\s`"]+))', text):
                 if (quoted or bare) not in allowed:
@@ -690,7 +709,7 @@ def registered_model_gaps(registration: str, readme: str) -> list[str]:
                  if said != REGISTERED_ANSWERING_SETTINGS]
     commands = readme_score_commands(readme)
     if len(commands) < 3:
-        return [*gaps, f"the README gives {len(commands)} score commands, not 3 or more"]
+        return [*gaps, f"the documents give {len(commands)} score commands, not 3 or more"]
     gaps += [f"the registered full run gives {flag} {commands[0].get(flag)!r}, not {value!r}"
              for flag, value in MODEL_FLAGS.items() if commands[0].get(flag) != value]
     for n, command in enumerate(commands, 1):
@@ -703,7 +722,7 @@ def registered_model_gaps(registration: str, readme: str) -> list[str]:
     checks = [c for c in commands if c.get("--answering-model") == SENSITIVITY_MODEL]
     if len(checks) != 1 or any(checks[0].get(flag) != MODEL_FLAGS[flag]
                                for flag in MODEL_FLAGS if flag != "--answering-model"):
-        gaps.append(f"the README gives {len(checks)} sensitivity checks with the registered "
+        gaps.append(f"the documents give {len(checks)} sensitivity checks with the registered "
                     "settings, construction model and embedding model, not one")
     # The registered runs, the full run and the sensitivity check, also pass the training cutoff
     # and the two files beside the H- and CF streams (sections 10 and 12).
@@ -724,20 +743,20 @@ REGISTERED_RUN_OPTIONS = {"--training-cutoff": "2026-07-01",
 def test_the_registration_and_the_readme_give_the_registered_models():
     """The four values the scorer holds as the registered ones (``REGISTERED_ANSWERING_MODEL``,
     ``REGISTERED_ANSWERING_SETTINGS``, ``REGISTERED_CONSTRUCTION_MODEL`` and
-    ``REGISTERED_EMBEDDING_MODEL``) are those section 11 registers and those the README's score
+    ``REGISTERED_EMBEDDING_MODEL``) are those section 11 registers and those the documents' score
     commands give, letter for letter, since the scorer compares them so."""
     registration = (ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     assert registered_model_gaps(registration, readme) == []
 
 
 def readme_quotes(readme: str) -> list[str]:
-    """The lines the README quotes from results.md: its block quotes, without the marker."""
+    """The lines the documents quote from results.md: their block quotes, without the marker."""
     return [line[2:] for line in readme.splitlines() if line.startswith("> ")]
 
 
 def example_answers(data: Path) -> dict[str, list[dict]]:
-    """Answer rows for the README's three score examples on ``data``: every compared system and
+    """Answer rows for the documents' three score examples on ``data``: every compared system and
     grep at D on every H- F1-change item, for the registered full run (``asofbench-answers``);
     bm25 alone on every item (``asofbench-answers-bm25``); and the six pilot systems on the pilot's
     items, for the sensitivity check. Half the answers are right; three runs each."""
@@ -768,20 +787,20 @@ def example_answers(data: Path) -> dict[str, list[dict]]:
 
 
 def quote_gaps(readme: str, written: list[str]) -> list[str]:
-    """Each line the README quotes from results.md that no results.md in ``written`` holds."""
+    """Each line the documents quote from results.md that no results.md in ``written`` holds."""
     lines = {line for text in written for line in text.splitlines()}
     quotes = readme_quotes(readme)
     return [quote for quote in quotes if not any(quote in line for line in lines)] or (
-        [] if quotes else ["the README quotes no results.md line"])
+        [] if quotes else ["the documents quote no results.md line"])
 
 
 def test_the_readme_quotes_what_the_scorer_writes_for_its_own_examples(tmp_path):
-    """Every line the README quotes from results.md is a line, or a part of one, that the scorer
-    writes when the README's own score commands (the registered full run, the run of bm25 alone and
-    the sensitivity check) are run on data/v0.1 with answers in the README's places; the two files
+    """Every line the documents quote from results.md is a line, or a part of one, that the scorer
+    writes when their own score commands (the registered full run, the run of bm25 alone and
+    the sensitivity check) are run on data/v0.1 with answers in the places they give; the two files
     beside the streams, which a unit run does not build, are left out, and no quoted line depends
     on them."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     data = ROOT / "data" / "v0.1"
     answers = example_answers(data)
     written = []
@@ -807,7 +826,7 @@ def test_the_readme_quotes_what_the_scorer_writes_for_its_own_examples(tmp_path)
 # under which a run of every item, or of any list that held every F1 item of pilot.json, was it.
 STALE_PILOT_WORDS = ("with no `--items`, or with any `--items` list that holds them all",
                      "whose scope holds every F1 item of pilot.json", "or of every item")
-# The registered pilot run's scope (section 13 and the README), in the words both use.
+# The registered pilot run's scope (section 13 and the documents), in the words both use.
 PILOT_SCOPE = ("is exactly the items of pilot.json, given with `--items` (`--items "
                "data/v0.1/pilot.json`, or a list of exactly those item ids in any order)")
 
@@ -832,7 +851,7 @@ def pilot_scope_reasons(data: Path) -> tuple[str, str]:
 
 
 def decision_gaps(registration: str, readme: str, data: Path = ROOT / "data" / "v0.1") -> list[str]:
-    """Where section 13 or the README does not give gates.json's ``decision`` for a pilot that is
+    """Where section 13 or the documents do not give gates.json's ``decision`` for a pilot that is
     not evaluable as the scorer's one constructor of it (``scoring._not_evaluable``) writes it:
     "not evaluable: " and the reasons, then the scorer's sentence on the registered pilot run
     (``REGISTERED_PILOT``) and its sentence on the six pilot systems, each quoted as the code writes
@@ -849,7 +868,7 @@ def decision_gaps(registration: str, readme: str, data: Path = ROOT / "data" / "
     head, *parts = built.split("; ")
     assert head == "not evaluable: a reason" and parts[0] == "no H- F1 answers from bm25", built
     assert parts[1] == scoring.REGISTERED_PILOT, built
-    places = {"section 13": registration_section(registration, 13), "README.md": readme}
+    places = {"section 13": registration_section(registration, 13), "the documents": readme}
     top = "in both shapes the decision is gates.json's top-level field `decision`"
     gaps = [f"{where} does not quote {phrase!r}" for where, text in places.items()
             for phrase in ('"not evaluable: "', f'"{scoring.REGISTERED_PILOT}"', f'"{parts[2]}"',
@@ -860,7 +879,7 @@ def decision_gaps(registration: str, readme: str, data: Path = ROOT / "data" / "
         ("section 13", ("A run with no `--items`, which scores every item, is therefore never the "
                         "registered pilot run", f'"{every}" in a run of every item',
                         f'"{alone}" in a run of pilot.json\'s PEP items alone')),
-        ("README.md", ("A run of every item, the registered full run included, is never the "
+        ("the documents", ("A run of every item, the registered full run included, is never the "
                        "registered pilot run",)),
     ):
         gaps += [f"{where} does not say {phrase!r}" for phrase in phrases
@@ -870,10 +889,10 @@ def decision_gaps(registration: str, readme: str, data: Path = ROOT / "data" / "
 
 
 def test_the_registration_and_the_readme_give_the_decision_of_a_pilot_that_is_not_evaluable():
-    """Section 13 and the README say what gates.json's ``decision`` holds for a pilot that is not
+    """Section 13 and the documents say what gates.json's ``decision`` holds for a pilot that is not
     evaluable, in the scorer's own words."""
     registration = (ROOT / "PREREGISTRATION.md").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     assert decision_gaps(registration, readme) == []
 
 
@@ -887,20 +906,20 @@ CC0_LEGAL_CODE_SHA256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c
 def test_the_licences_are_the_mit_licence_and_the_cc0_legal_code():
     """LICENSE-DATA is the CC0 1.0 legal code and nothing else, so that licence detectors recognise
     it, and git converts the line endings of neither licence file (.gitattributes), so that a
-    checkout on any platform holds those bytes; the README says which files it covers, the
-    published results and every file published beside them, the label files included, among them;
-    the labelling guidelines say that annotators label on the understanding that their label files
-    are dedicated so; the package's metadata names both licences and both files; and CITATION.cff,
-    whose licence list the CFF format reads as alternatives, names the dataset's licence alone and
-    both in its abstract, with the same files."""
+    checkout on any platform holds those bytes; docs/data-and-licences.md says which files it
+    covers, the published results and every file published beside them, the label files included,
+    among them; the labelling guidelines say that annotators label on the understanding that
+    their label files are dedicated so; the package's metadata names both licences and both
+    files; and CITATION.cff, whose licence list the CFF format reads as alternatives, names the
+    dataset's licence alone and both in its abstract, with the same files."""
     data = (ROOT / "LICENSE-DATA").read_bytes()
     assert hashlib.sha256(data).hexdigest() == CC0_LEGAL_CODE_SHA256
     assert data.startswith(b"Creative Commons Legal Code\n\nCC0 1.0 Universal\n")
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
     assert "LICENSE -text" in attributes and "LICENSE-DATA -text" in attributes
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    licences = readme.split("\n## Data and licences\n", 1)[1].split("\n## ", 1)[0]
-    assert "[LICENSE-DATA](LICENSE-DATA) holds the CC0 1.0 legal code" in licences
+    readme = documents()
+    licences = (ROOT / "docs" / "data-and-licences.md").read_text(encoding="utf-8")
+    assert "[LICENSE-DATA](../LICENSE-DATA) holds the CC0 1.0 legal code" in licences
     assert "the published results of v0.1 (results.md, results.json and gates.json" in licences
     assert "every file published beside the results report" in licences
     assert "the label files included, other than the code and documents above" in licences
@@ -920,9 +939,9 @@ def test_the_licences_are_the_mit_licence_and_the_cc0_legal_code():
     assert "every file published beside the results report, the label files included" in abstract
 
 
-# The README's F1-recent counts by the training cutoff ("What the scores mean"), each as a pattern
-# of its own words: the two groups, the June 2026 items of the first, and the gold that is the
-# status at S in the second.
+# The documents' F1-recent counts by the training cutoff ("What the scores mean", in
+# docs/scoring.md), each as a pattern of its own words: the two groups, the June 2026 items of the
+# first, and the gold that is the status at S in the second.
 README_RECENT = (
     r"recorded before 2026-07-01 \((\d+) of the (\d+) PEP and (\d+) of the (\d+) Ethereum items\) "
     r"or on or after it \((\d+) and (\d+)\)",
@@ -934,7 +953,7 @@ README_RECENT = (
 
 
 def readme_recent_counts(readme: str, data: Path) -> tuple[list, list]:
-    """The README's F1-recent counts (``README_RECENT``) and the same counts from data/v0.1's gold
+    """The documents' F1-recent counts (``README_RECENT``) and the same counts from data/v0.1's gold
     (``meta.interval_start`` and ``meta.gold_equals_status_at_s``)."""
     questions = [json.loads(line) for line in (data / "questions.jsonl").read_text(
         encoding="utf-8").splitlines()]
@@ -963,7 +982,7 @@ def readme_recent_counts(readme: str, data: Path) -> tuple[list, list]:
 def test_the_readme_states_the_f1_recent_counts_that_data_v0_1_holds():
     # What the scores mean: the F1-recent items before the training cutoff and on or after it, the
     # June 2026 items, and those whose gold is the status at S, as gold.jsonl's meta gives them.
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     stated, held = readme_recent_counts(readme, ROOT / "data" / "v0.1")
     assert stated == held
 
@@ -971,7 +990,7 @@ def test_the_readme_states_the_f1_recent_counts_that_data_v0_1_holds():
 def test_the_readme_states_how_large_a_difference_the_ethereum_reading_can_show():
     # Known limitations: on the 23 Ethereum items left without header-only episodes, the bound
     # follows Holm's step-down order, so it depends on where the comparison's p falls.
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = documents()
     assert power_gaps(readme, ROOT / "data" / "v0.1") == []
 
 

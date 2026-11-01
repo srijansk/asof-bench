@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 [project]
 name = "asofbench"
 version = "0.1.0"
-description = "A pre-registered benchmark that asks what a project had decided as of a given date, with gold taken from the git history of public decision records."
+description = "What did a project decide, as of a given date? A pre-registered benchmark for the memory and retrieval systems that give language-model agents their context."
 readme = "README.md"
 # The code and documents are MIT; data/v0.1, which the source distribution ships, is CC0 1.0.
 license = "MIT AND CC0-1.0"
@@ -33,6 +33,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/srijansk/asof-bench"
+Documentation = "https://github.com/srijansk/asof-bench#documentation"
 Source = "https://github.com/srijansk/asof-bench"
 Issues = "https://github.com/srijansk/asof-bench/issues"
 
@@ -60,6 +61,8 @@ only-include = [
     "PREREGISTRATION.md",
     "README.md",
     "data",
+    "docs",
+    "examples",
     "labelling",
     "pyproject.toml",
     "src",

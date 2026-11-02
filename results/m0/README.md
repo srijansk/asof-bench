@@ -39,6 +39,18 @@ It ran on 2026-11-02 from 05:18:55 to 10:30:20 UTC, in six invocations. Before e
 
 From invocation 4 on, the run used operational overrides that change memory settings only: the embedding server's allocator settings (two glibc arenas and a fixed 128 KiB mmap threshold, overrides/invocations-4-5.yaml) and, from invocation 6, also Neo4j's container memory limit, raised from 1 GiB to 1.5 GiB with its heap and page cache unchanged (overrides/invocation-6.yaml). No model, prompt, weight, dtype or vector changed. The Docker VM had 7.75 GiB of memory, shared with other workloads.
 
+The operator read each container's memory with `docker stats --no-stream` at these times (one reading each; a container's use varies within minutes, so these are snapshots, not peaks). At 06:45 the VM's swap (1 GiB) was full and about 1.1 GB of its memory was available.
+
+| Time (UTC) | Episodes logged | Embedding server | Neo4j (limit) | Graphiti | Egress proxy | Settings in force |
+|---|---:|---:|---:|---:|---:|---|
+| about 05:20 | 4 | 439 MiB | 684 MiB (1 GiB) | 134 MiB | 19 MiB | compose.yaml's own |
+| 06:08 | 219 | 1.48 GiB | 897 MiB (1 GiB) | 193 MiB | 20 MiB | compose.yaml's own |
+| 06:45 | 387 | 728 MiB | 948 MiB (1 GiB) | 196 MiB | 20 MiB | compose.yaml's own; the server restarted at 06:33 |
+| 07:45 | 633 | 1.21 GiB | 950 MiB (1 GiB) | 191 MiB | 20 MiB | compose.yaml's own |
+| 08:06 | 728 | 593 MiB | 886 MiB (1 GiB) | 203 MiB | 20 MiB | the allocator settings, from 07:47 |
+| 08:47 | 930 | 515 MiB | 972 MiB (1 GiB) | 177 MiB | 20 MiB | the allocator settings; Neo4j restarted at 08:42 |
+| 09:31 | 1,117 | 491 MiB | 1.20 GiB (1.5 GiB) | 192 MiB | 20 MiB | the allocator settings and Neo4j's 1.5 GiB limit, from 08:49 |
+
 ## Commands
 
 From the repository's root, with the local streams built as [docs/rebuilding.md](../../docs/rebuilding.md#building-the-streams) says. The input, prepared outside the checkout:

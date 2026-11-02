@@ -17,9 +17,12 @@ episodes hold proposal text, so ``<dir>`` must be outside the checkout.
 
 checks that the summary is the finished run of claude-haiku-5-5 over the prepared input (its
 stream's SHA-256 is prepare.json's ``input_sha256``; its last invocation exited with status 0 or
-1 and its log covers every episode; no call raised) and that prepare.json, questions.jsonl and
-the three local streams are the registered ones, then applies section 13's projection and writes
-it, step by step, to ``projection.json``:
+1 and its log covers every episode; no call raised inside an attempt that ingested its episode,
+where Graphiti caught the failure and carried on, and every call that raised has its attempt;
+the calls that raised inside attempts that failed or stopped, which caused the failure or the
+stop, are reported, not refused) and that prepare.json, questions.jsonl and the three local
+streams are the registered ones, then applies section 13's projection and writes it, step by
+step, to ``projection.json``:
 
 1. the rates, ``in_per_char = input_tokens / text_chars`` and ``out_per_char = output_tokens /
    text_chars``, with the tokens of the run's ingestion attempts from its summary.json (every
@@ -71,6 +74,9 @@ NO_K = ("the named proposals alone are projected beyond the budget, so no k fits
         "registration does not provide for this case")
 # The exit statuses of an ingestion that reached the stream's end (graphiti/ingest.py).
 FINISHED = (0, 1)
+# The outcomes of the attempt a call that raised fell in, as summary.json's
+# api_errors_by_outcome splits them (graphiti/ingest.py ATTEMPT_OUTCOMES).
+ATTEMPT_OUTCOMES = ("ingested", "failed", "stopped", "unknown")
 
 
 class Refused(Exception):
@@ -255,10 +261,25 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
     if logged != summary.get("episodes"):
         raise Refused(f"{name_of(summary_path)} is not a finished run: its log covers {logged} "
                       f"of its {summary.get('episodes')} episodes")
-    if summary.get("api_errors") != 0:
-        raise Refused(f"{name_of(summary_path)} records {summary.get('api_errors')!r} calls that "
-                      "raised: some calls failed inside Graphiti, so the rates would be "
-                      "understated")
+    # A call that raised inside an attempt that failed or stopped is the cause of that failure or
+    # stop, which the log and run.json record; one inside an attempt that ingested its episode is
+    # a failure that Graphiti caught and carried on from.
+    split = summary.get("api_errors_by_outcome")
+    if (not isinstance(split, dict) or set(split) != set(ATTEMPT_OUTCOMES)
+            or any(type(count) is not int or count < 0 for count in split.values())
+            or sum(split.values()) != summary.get("api_errors")):
+        raise Refused(f"{name_of(summary_path)} does not split its calls that raised "
+                      f"(api_errors: {summary.get('api_errors')!r}) by the outcome of the attempt "
+                      f"they fell in (api_errors_by_outcome: {', '.join(ATTEMPT_OUTCOMES)})")
+    if split["ingested"]:
+        raise Refused(f"{name_of(summary_path)}: {split['ingested']} of its calls that raised fell "
+                      "inside attempts that ingested their episode. Graphiti caught those "
+                      "failures and carried on, which can save an episode without what a call "
+                      "would have given (an edge's validity times, for example) and leaves the "
+                      "failed calls out of the token count")
+    if split["unknown"]:
+        raise Refused(f"{name_of(summary_path)}: {split['unknown']} of its calls that raised fell "
+                      "in no attempt that its log can place")
     text_chars = prepared["text_chars"]
     if not isinstance(text_chars, int) or text_chars <= 0:
         raise Refused(f"{name_of(prepare_path)} counts no characters")
@@ -287,7 +308,8 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
         "inputs": hashes,
         "pilot": {key: summary.get(key) for key in ("episodes", "ok", "failed", "text_chars",
                                                     "input_tokens", "output_tokens", "calls",
-                                                    "api_errors", "calls_over_100k_input",
+                                                    "api_errors", "api_errors_by_outcome",
+                                                    "calls_over_100k_input",
                                                     "removal", "wall_s", "elapsed_s", "exit",
                                                     "graphiti_core", "model", "images")},
         "rates": {"in_per_char": float(rates[0]), "out_per_char": float(rates[1]),

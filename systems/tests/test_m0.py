@@ -128,6 +128,11 @@ def order(candidates: list[str]) -> list[str]:
         f"asof-bench/v0.1|distractor|{c}".encode()).hexdigest())
 
 
+def split(ingested: int = 0, failed: int = 0, stopped: int = 0, unknown: int = 0) -> dict:
+    """A summary's api_errors_by_outcome."""
+    return {"ingested": ingested, "failed": failed, "stopped": stopped, "unknown": unknown}
+
+
 class World:
     """A synthetic M0: three local streams over named proposals and candidates, a manifest that
     registers them and questions.jsonl, the questions, a summary and prepare.json. ``sizes``
@@ -162,7 +167,7 @@ class World:
             "arm": "H+", "stream": "m0-h-plus.jsonl", "stream_sha256": input_sha256,
             "episodes": 4, "ok": 4, "failed": 0, "text_chars": 1000,
             "input_tokens": 10_000_000, "output_tokens": 2_000_000, "calls": 40,
-            "api_errors": 0, "calls_over_100k_input": 0,
+            "api_errors": 0, "api_errors_by_outcome": split(), "calls_over_100k_input": 0,
             "removal": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "api_errors": 0},
             "wall_s": 120.0, "elapsed_s": 70.0, "exit": 0, "graphiti_core": "0.31.2",
             "model": "claude-haiku-5-5"}), encoding="utf-8")
@@ -368,13 +373,42 @@ def test_project_refuses_a_run_that_did_not_reach_the_stream_s_end(tmp_path, cap
     assert world.project() == 0
 
 
-def test_project_refuses_a_run_in_which_a_call_failed(tmp_path, capsys):
-    world = World(tmp_path, SMALL, named=["PEP-1"])
-    world.edit(world.summary, api_errors=2)
-    assert world.project() == 2
-    assert "some calls failed inside Graphiti, so the rates would be understated" in (
-        capsys.readouterr().err)
-    assert not world.out.exists()
+def test_project_refuses_a_call_that_raised_inside_an_attempt_that_ingested_its_episode(
+        tmp_path, capsys):
+    cases = [(split(ingested=1), 1, "1 of its calls that raised fell inside attempts that "
+                                    "ingested their episode. Graphiti caught those failures"),
+             (split(ingested=1, stopped=2), 3, "1 of its calls that raised fell inside attempts "
+                                               "that ingested their episode"),
+             (split(unknown=1), 1, "1 of its calls that raised fell in no attempt that its log "
+                                   "can place"),
+             # A split that does not add up, or lacks an outcome, or no split at all.
+             (split(stopped=1), 2, "does not split its calls that raised (api_errors: 2)"),
+             ({"stopped": 1}, 1, "does not split its calls that raised (api_errors: 1)"),
+             (None, 0, "does not split its calls that raised (api_errors: 0)")]
+    for index, (by_outcome, api_errors, message) in enumerate(cases):
+        world = World(tmp_path / str(index), SMALL, named=["PEP-1"])
+        world.edit(world.summary, api_errors=api_errors, api_errors_by_outcome=by_outcome)
+        assert world.project() == 2
+        assert message in capsys.readouterr().err
+        assert not world.out.exists()
+
+
+def test_project_reports_the_calls_that_raised_inside_failed_or_stopped_attempts(tmp_path):
+    # Those calls caused the attempt's failure or the run's stop, which the log and run.json
+    # record; the rates are projected from every attempt's tokens all the same.
+    world = World(tmp_path, SMALL, named=["PEP-1", "PEP-2"])
+    world.edit(world.summary, api_errors=3, api_errors_by_outcome=split(failed=1, stopped=2))
+    assert world.project() == 0
+    pilot = world.projection()["pilot"]
+    assert (pilot["api_errors"], pilot["api_errors_by_outcome"]) == (
+        3, split(failed=1, stopped=2))
+    assert world.projection()["total"]["cost_usd"] == pytest.approx(240.0)
+
+
+def test_m0_splits_the_calls_that_raised_by_the_outcomes_that_ingest_gives():
+    from graphiti import ingest
+
+    assert m0.ATTEMPT_OUTCOMES == ingest.ATTEMPT_OUTCOMES
 
 
 def test_the_rates_count_the_ingestion_attempts_and_not_the_removal_calls(tmp_path):

@@ -269,13 +269,11 @@ def test_the_usage_log_records_each_response_under_the_current_episode(environme
         key_file, transport=httpx.MockTransport(recorder)), usage.UsageLog(str(path)))
 
     async def calls(client):
-        token = usage.usage_context.set("0123456789ab:PEP-1")
-        try:
+        with usage.attributed("0123456789ab:PEP-1", 2, 3):
             await ask(client)
-            # Tasks started while an episode is ingested make their calls under its id.
+            # Tasks started while an episode is ingested make their calls under its id, in the
+            # same invocation and attempt.
             await asyncio.gather(ask(client), ask(client))
-        finally:
-            usage.usage_context.reset(token)
         token = usage.usage_context.set("ba9876543210:EIP-2")
         try:
             await ask(client)
@@ -285,11 +283,12 @@ def test_the_usage_log_records_each_response_under_the_current_episode(environme
 
     run(client, calls)
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [line["context"] for line in lines] == ["0123456789ab:PEP-1"] * 3 + [
-        "ba9876543210:EIP-2", None]
-    assert set(lines[0]) == {"ts", "context", "model", "input_tokens", "output_tokens",
-                             "cache_creation_input_tokens", "cache_read_input_tokens",
-                             "stop_reason", "error"}
+    assert [(line["context"], line["invocation"], line["attempt"]) for line in lines] == [
+        ("0123456789ab:PEP-1", 2, 3)] * 3 + [("ba9876543210:EIP-2", None, None),
+                                             (None, None, None)]
+    assert set(lines[0]) == {"ts", "context", "invocation", "attempt", "model", "input_tokens",
+                             "output_tokens", "cache_creation_input_tokens",
+                             "cache_read_input_tokens", "stop_reason", "error"}
     assert {key: lines[0][key] for key in USAGE} == USAGE
     assert (lines[0]["model"], lines[0]["stop_reason"], lines[0]["error"]) == (
         MODEL, "end_turn", None)
@@ -326,20 +325,19 @@ def test_a_call_that_raises_is_recorded_with_its_class_only(environment, key_fil
     graphiti_llm = adapter.make_llm_client(client)
 
     async def calls(_):
-        token = usage.usage_context.set("0123456789ab:PEP-1")
-        try:
+        with usage.attributed("0123456789ab:PEP-1", 1, 1):
             return await graphiti_llm.generate_response(
                 [Message(role="system", content="Extract."), Message(role="user", content="T.")],
                 response_model=Answer)
-        finally:
-            usage.usage_context.reset(token)
 
     assert run(client, calls) == {"value": "toy"}
     text = path.read_text(encoding="utf-8")
     lines = [json.loads(line) for line in text.splitlines()]
-    assert [(line["context"], line["error"]) for line in lines] == [
-        (None, "APIConnectionError"), ("0123456789ab:PEP-1", "BadRequestError"),
-        ("0123456789ab:PEP-1", None)]
+    # The failure Graphiti caught is in the same attempt as the answer it carried on with.
+    assert [(line["context"], line["invocation"], line["attempt"], line["error"])
+            for line in lines] == [(None, None, None, "APIConnectionError"),
+                                   ("0123456789ab:PEP-1", 1, 1, "BadRequestError"),
+                                   ("0123456789ab:PEP-1", 1, 1, None)]
     assert all(line[count] == 0 for line in lines[:2] for count in USAGE)
     assert (lines[1]["model"], lines[1]["stop_reason"]) == (MODEL, None)
     assert KEY not in text and "toy refusal" not in text

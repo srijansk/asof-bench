@@ -17,8 +17,10 @@
 # without them.
 #
 # Each service has a memory limit, and each is the first that the kernel stops if the machine
-# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else. Neo4j
-# restarts when it stops; the ingestion it interrupts stops with exit status 2, to be resumed.
+# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else. The
+# proxy, the embedding server and Neo4j restart when they stop without a `docker stop` (an
+# out-of-memory kill included); an ingestion that one of them interrupts stops with exit status
+# 2, to be resumed (README.md).
 name: asofbench-graphiti
 
 services:
@@ -32,6 +34,7 @@ services:
       - outer
     mem_limit: 128m
     oom_score_adj: 1000
+    restart: unless-stopped
 
   embedder:
     image: asofbench/embedder
@@ -40,6 +43,7 @@ services:
       - inner
     mem_limit: 2560m
     oom_score_adj: 1000
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
       interval: 5s

@@ -96,7 +96,7 @@
     "skip": "ingest --resume --skip-episode <episode_id> logs the first episode of its group with no log line as failed (skipped by the operator after repeated infrastructure stops), records it in run.json and goes on",
     "lock": "every invocation, the removal of episodes included, holds the output directory's lock: it creates run.lock with O_EXCL (flock and lockf do not exclude across containers on Docker Desktop's bind mounts), touches it every 30 s and removes it at its end; a second one stops at once with exit status 2; a SIGTERM cancels the invocation, which records itself and releases the lock; one killed outright leaves the lock, for the operator to remove once it is gone",
     "crash": "an exception that no rule expects ends the invocation with exit status 4, which run.json records with the exception's class",
-    "calls_that_raise": "every call that raises after the SDK's retries is a usage line with no tokens and its exception's class, counted as api_errors, so that a failure Graphiti catches and carries on from stays visible"
+    "calls_that_raise": "every call that raises after the SDK's retries is a usage line with no tokens and its exception's class, under the episode, the invocation and the attempt that made it, so that a failure Graphiti catches and carries on from stays visible; summary.json counts them as api_errors, split by the outcome of the attempt they fell in (api_errors_by_outcome: ingested, failed, stopped, unknown), and M0 refuses those inside an attempt that ingested its episode and those no attempt can place"
   },
   "concurrency": {
     "semaphore_limit": 20,

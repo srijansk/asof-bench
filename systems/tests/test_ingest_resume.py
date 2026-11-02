@@ -54,19 +54,21 @@ def write_stream(path: Path, episodes: list[dict]) -> Path:
     return path
 
 
-def log_line(e: dict, ok: bool, uuid: str | None, wall_s: float = 2.0, attempts: int = 1) -> dict:
+def log_line(e: dict, ok: bool, uuid: str | None, wall_s: float = 2.0, attempts: int = 1,
+             invocation: int = 1) -> dict:
     return {"episode_id": e["episode_id"], "proposal": e["proposal"], "group_id": e["corpus"],
             "episode_uuid": uuid, "ok": ok, "error": None if ok else "RuntimeError: earlier",
             "started_at": "2026-11-01T00:00:00Z", "wall_s": wall_s, "text_chars": len(e["text"]),
-            "attempts": attempts}
+            "attempts": attempts, "invocation": invocation}
 
 
 def usage_line(context: str | None, input_tokens: int, output_tokens: int, created: int = 0,
-               read: int = 0, model: str = "claude-haiku-5-5") -> dict:
-    return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "model": model,
-            "input_tokens": input_tokens, "output_tokens": output_tokens,
-            "cache_creation_input_tokens": created, "cache_read_input_tokens": read,
-            "stop_reason": "tool_use"}
+               read: int = 0, model: str = "claude-haiku-5-5", invocation: int | None = None,
+               attempt: int | None = None) -> dict:
+    return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "invocation": invocation,
+            "attempt": attempt, "model": model, "input_tokens": input_tokens,
+            "output_tokens": output_tokens, "cache_creation_input_tokens": created,
+            "cache_read_input_tokens": read, "stop_reason": "tool_use"}
 
 
 def write_jsonl(path: Path, lines: list[dict]) -> None:
@@ -82,9 +84,11 @@ class FakeEngine:
     attempt through the run's usage log (as the instrumented client does), and stores each
     episode it ingests. ``outcomes`` gives, for an episode, what each of its attempts does: an
     exception to raise, "orphan" to store the episode and then raise, "swallowed" to record a
-    call that raised and succeed all the same (as Graphiti does where it catches one), or None
-    to succeed (the default once the list is used up). With ``broken``, reading the store raises
-    an error that no rule expects."""
+    call that raised and succeed all the same (as Graphiti does where it catches one),
+    "overloaded" to record a call that raised OverloadedError and raise it (an infrastructure
+    stop), "bad-request" to record a call that raised BadRequestError and raise it (a failed
+    attempt), or None to succeed (the default once the list is used up). With ``broken``, reading
+    the store raises an error that no rule expects."""
 
     def __init__(self, usage_log: usage.UsageLog, stored: list[dict],
                  outcomes: dict[str, list], broken: bool = False) -> None:
@@ -95,7 +99,7 @@ class FakeEngine:
         self.source, self.version, self.closed = "text", "0.31.2", False
 
     def call(self, tokens: int) -> None:
-        self.usage_log.record(usage.usage_context.get(), "claude-haiku-5-5",
+        self.usage_log.record(usage.attribution(), "claude-haiku-5-5",
                               {"input_tokens": tokens, "output_tokens": tokens // 10}, "tool_use")
 
     async def add_episode(self, **arguments) -> str:
@@ -111,8 +115,16 @@ class FakeEngine:
                                 "group_id": arguments["group_id"]})
             raise RuntimeError("failed after writing")
         if outcome == "swallowed":
-            self.usage_log.record_error(usage.usage_context.get(), "claude-haiku-5-5",
+            self.usage_log.record_error(usage.attribution(), "claude-haiku-5-5",
                                         "OverloadedError")
+        elif outcome == "overloaded":
+            self.usage_log.record_error(usage.attribution(), "claude-haiku-5-5",
+                                        "OverloadedError")
+            raise Overloaded("still overloaded after the SDK's retries")
+        elif outcome == "bad-request":
+            self.usage_log.record_error(usage.attribution(), "claude-haiku-5-5",
+                                        "BadRequestError")
+            raise BadRequest("a request that the API refused")
         elif outcome is not None:
             raise outcome
         self.stored.append({"uuid": uuid, "name": arguments["name"],
@@ -487,6 +499,12 @@ def test_a_resume_refuses_a_store_or_a_log_that_does_not_match(tmp_path):
                                                    log_line(episodes[0], False, None)])
     with pytest.raises(ingest.Refused, match="has a line already"):
         harness.run(resume=True)
+    # A line must name the invocation and the attempts that ended it, which place its calls.
+    for broken in ({"invocation": 0}, {"invocation": None}, {"attempts": 0}, {"attempts": "1"}):
+        write_jsonl(harness.out / "ingest-log.jsonl",
+                    [{**log_line(episodes[0], True, "u1"), **broken}])
+        with pytest.raises(ingest.Refused, match="no invocation or no attempts"):
+            harness.run(resume=True)
 
 
 def test_a_stream_that_cannot_be_ingested_is_refused_before_anything_starts(tmp_path):
@@ -715,9 +733,9 @@ def test_the_operator_can_skip_an_episode_that_keeps_stopping_the_run(tmp_path):
     assert len(harness.record()["invocations"]) == 2
     assert harness.run(resume=True, skip=[ids[1], ids[2]]) == ingest.EXIT_FAILED
     skipped = harness.log()[1:3]
-    assert [(line["episode_id"], line["ok"], line["error"], line["attempts"], line["episode_uuid"])
-            for line in skipped] == [(ids[1], False, ingest.SKIPPED, 0, None),
-                                     (ids[2], False, ingest.SKIPPED, 0, None)]
+    assert [(line["episode_id"], line["ok"], line["error"], line["attempts"], line["episode_uuid"],
+             line["invocation"]) for line in skipped] == [
+        (ids[1], False, ingest.SKIPPED, 0, None, 3), (ids[2], False, ingest.SKIPPED, 0, None, 3)]
     assert harness.record()["invocations"][-1]["skipped"] == [ids[1], ids[2]]
     resumed = harness.engines[-1].calls
     assert [call["name"] for call in resumed] == ids[3:]
@@ -744,7 +762,9 @@ def test_remove_episodes_refuses_what_it_must_and_records_its_invocation(tmp_pat
             invocation["exit"], invocation["images"]) == (
         "remove-episodes", [f"uuid-{ids[1]}"], [f"uuid-{ids[1]}"], 0, IMAGES)
     assert invocation["elapsed_s"] is not None
-    assert harness.usage()[-1]["context"] == f"remove-episode:{ids[1]}"
+    removal = harness.usage()[-1]
+    assert (removal["context"], removal["invocation"], removal["attempt"]) == (
+        f"remove-episode:{ids[1]}", 2, None)
     assert harness.remove(["not-in-the-store"]) == ingest.EXIT_STOPPED
     assert harness.record()["invocations"][-1]["exit"] == ingest.EXIT_STOPPED
     # The resume attempts the episode again; the removal's calls are counted apart from the
@@ -758,31 +778,85 @@ def test_remove_episodes_refuses_what_it_must_and_records_its_invocation(tmp_pat
         invocation["elapsed_s"] for invocation in harness.record()["invocations"]))
 
 
-def test_a_call_that_raised_inside_an_ingested_episode_is_counted(tmp_path):
+def by_outcome(ingested: int = 0, failed: int = 0, stopped: int = 0, unknown: int = 0) -> dict:
+    return {"ingested": ingested, "failed": failed, "stopped": stopped, "unknown": unknown}
+
+
+def test_a_call_that_raised_inside_an_ingested_attempt_is_counted_as_ingested(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     harness = Harness(tmp_path, episodes)
     assert harness.run(resume=False, outcomes={episodes[1]["episode_id"]: ["swallowed"]}) == 0
     summary = harness.summary()
     assert (summary["ok"], summary["api_errors"], summary["calls"]) == (2, 1, 4)
+    assert summary["api_errors_by_outcome"] == by_outcome(ingested=1)
     (failed,) = [line for line in harness.usage() if line["error"]]
-    assert failed["context"] == episodes[1]["episode_id"]
+    assert (failed["context"], failed["invocation"], failed["attempt"]) == (
+        episodes[1]["episode_id"], 1, 1)
     assert (failed["error"], failed["input_tokens"], failed["output_tokens"]) == (
         "OverloadedError", 0, 0)
+
+
+def test_calls_that_raised_inside_failed_or_stopped_attempts_are_reported_apart(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2), episode(3)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    # The second episode's first attempt fails on a call that the API refused, and its second
+    # ingests it; the third episode's first attempt stops the run on a call that stayed
+    # overloaded.
+    assert harness.run(resume=False, outcomes={ids[1]: ["bad-request"],
+                                               ids[2]: ["overloaded"]}) == ingest.EXIT_STOPPED
+    assert harness.summary()["api_errors_by_outcome"] == by_outcome(failed=1, stopped=1)
+    # The resume ingests the third episode in its own first attempt. That attempt has the
+    # stopped one's number, 1, in another invocation, so it does not take the stopped one's
+    # failed call as its own.
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    summary = harness.summary()
+    assert (summary["ok"], summary["api_errors"]) == (3, 2)
+    assert summary["api_errors_by_outcome"] == by_outcome(failed=1, stopped=1)
+    assert [(line["episode_id"], line["invocation"], line["attempts"])
+            for line in harness.log()] == [(ids[0], 1, 1), (ids[1], 1, 2), (ids[2], 2, 1)]
+    assert [(line["context"], line["invocation"], line["attempt"], line["error"])
+            for line in harness.usage() if line["error"]] == [
+        (ids[1], 1, 1, "BadRequestError"), (ids[2], 1, 1, "OverloadedError")]
+    # Every line names the attempt it belongs to.
+    assert sorted({(line["context"], line["invocation"], line["attempt"])
+                   for line in harness.usage()}) == sorted(
+        [(ids[0], 1, 1), (ids[1], 1, 1), (ids[1], 1, 2), (ids[2], 1, 1), (ids[2], 2, 1)])
+
+
+def test_a_call_is_placed_in_its_attempt_by_the_invocation_and_the_number_together():
+    e = episode(1, kind="create")
+    logged = {e["episode_id"]: log_line(e, True, "u1", attempts=2, invocation=2)}
+
+    def outcome(invocation, attempt, context=e["episode_id"]):
+        line = {**usage_line(context, 0, 0, invocation=invocation, attempt=attempt),
+                "error": "BadRequestError"}
+        return ingest.attempt_outcome(line, logged)
+
+    assert [outcome(2, 2), outcome(2, 1), outcome(1, 1), outcome(1, 3)] == [
+        "ingested", "failed", "stopped", "stopped"]
+    assert outcome(1, 1, context=episode(2)["episode_id"]) == "stopped"
+    # A line with no attempt, or one the log cannot have made, is placed nowhere.
+    assert [outcome(None, None), outcome(2, None), outcome(2, 0), outcome(2, 3), outcome(3, 1),
+            outcome(True, 1)] == ["unknown"] * 6
 
 
 def test_summary_counts_ingestion_attempts_apart_from_removal_and_unattributed_calls():
     episodes = [episode(1, kind="create")]
     eid = episodes[0]["episode_id"]
-    failed_call = {**usage_line(eid, 0, 0), "error": "BadRequestError"}
-    lines = [usage_line(eid, 100, 10), failed_call, usage_line(eid, 50, 5, created=5),
-             usage_line(f"remove-episode:{eid}", 1000, 100),
-             {**usage_line(f"remove-episode:{eid}", 0, 0), "error": "RateLimitError"},
+    failed_call = {**usage_line(eid, 0, 0, invocation=1, attempt=1), "error": "BadRequestError"}
+    lines = [usage_line(eid, 100, 10, invocation=1, attempt=1), failed_call,
+             usage_line(eid, 50, 5, created=5, invocation=1, attempt=1),
+             usage_line(f"remove-episode:{eid}", 1000, 100, invocation=2),
+             {**usage_line(f"remove-episode:{eid}", 0, 0, invocation=2),
+              "error": "RateLimitError"},
              usage_line(None, 7, 1)]
     summary = ingest.summarize(episodes, [log_line(episodes[0], True, "u1")], lines,
                                record_of([1.0]), graphiti_core="0.31.2")
     assert {key: summary[key] for key in ("input_tokens", "output_tokens", "calls",
                                           "api_errors")} == {
         "input_tokens": 155, "output_tokens": 15, "calls": 2, "api_errors": 1}
+    assert summary["api_errors_by_outcome"] == by_outcome(ingested=1)
     assert summary["removal"] == {"input_tokens": 1000, "output_tokens": 100, "calls": 1,
                                   "api_errors": 1}
     assert summary["unattributed"] == {"input_tokens": 7, "output_tokens": 1, "calls": 1,

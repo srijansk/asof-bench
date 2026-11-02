@@ -14,7 +14,9 @@ passes. Then it builds Graphiti as adapter.py configures it, checks that the sto
 the episodes that the ingest log records as ingested (none, for a new run), and ingests the
 stream's episodes: one group per corpus (Graphiti's ``group_id``), the episodes of a group
 strictly in stream order, each awaited before the next, and the two groups concurrently. While an
-episode is ingested, every model call is recorded in the usage log under its id.
+episode is ingested, every model call is recorded in the usage log under its id, the invocation
+(its place in run.json's ``invocations``, from 1) and the attempt (from 1, within the invocation),
+so that a call that raised can be placed in the attempt it fell in (``attempt_outcome``).
 
 An episode that raises is retried in place, after RETRY_DELAYS_S (two more attempts), with the
 same previous episodes and saga predecessor; one that still raises is logged as failed and is
@@ -47,7 +49,8 @@ It writes, in ``--out``, and none of these files holds a local path:
   (null when the first attempt succeeded, else the last failed attempt's exception class and the
   first 300 characters of its message, the key taken out, or SKIPPED), ``started_at`` (its first
   attempt), ``wall_s`` (its attempts' time, the waits between them not included), ``text_chars``
-  (its ``text`` in code points, as the manifest counts them) and ``attempts``;
+  (its ``text`` in code points, as the manifest counts them), ``attempts`` and ``invocation``
+  (the invocation that logged it);
 - ``summary.json``, written atomically: the totals over the whole log and every usage line, each
   counted once, as ``summarize`` describes.
 
@@ -98,7 +101,10 @@ ARMS = ("H+", "H-", "CF")
 LOG, USAGE, SUMMARY, NETCHECK, RUN, LOCK = ("ingest-log.jsonl", "usage.jsonl", "summary.json",
                                             "netcheck.json", "run.json", "run.lock")
 LOG_FIELDS = ("episode_id", "proposal", "group_id", "episode_uuid", "ok", "error", "started_at",
-              "wall_s", "text_chars", "attempts")
+              "wall_s", "text_chars", "attempts", "invocation")
+# The outcomes of the attempt that a call which raised fell in (``attempt_outcome``), by which
+# summary.json splits its ``api_errors``.
+ATTEMPT_OUTCOMES = ("ingested", "failed", "stopped", "unknown")
 # The fields of a stream's episode (section 8).
 EPISODE_FIELDS = ("episode_id", "corpus", "repo", "proposal", "ref", "recorded_at", "commit",
                   "message", "kind", "text")
@@ -241,14 +247,20 @@ def hold_lock(out_dir: Path, command: str = "ingest") -> Iterator[None]:
     or a killed one left it, whose heartbeat has stopped."""
     path = out_dir / LOCK
     token = uuid.uuid4().hex
+    # The lock is the file's existence, not flock(2) or lockf(3). Two containers that shared one
+    # bind-mounted directory on Docker Desktop were each granted an exclusive flock, and each a
+    # lockf, on the same file there, so neither excludes the other invocation; an O_EXCL create
+    # of a file that exists fails with EEXIST in the second container, so it does. The cost is
+    # that an invocation killed outright leaves the file, which its stopped heartbeat shows and
+    # the operator removes (README.md).
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
         raise Refused(f"another invocation holds the lock on this output directory ({LOCK}: "
                       f"{held_by(path)}): one invocation at a time. A killed invocation leaves "
                       f"its lock, whose heartbeat stops (a live one touches it every "
-                      f"{LOCK_HEARTBEAT_S:g} s): once you are sure that its invocation is gone, "
-                      f"remove {LOCK} and run again") from None
+                      f"{LOCK_HEARTBEAT_S:g} s): once you are sure that its invocation is gone "
+                      f"(README.md says how to check), remove {LOCK} and run again") from None
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(json.dumps({"token": token, "command": command,
                                  "host": socket.gethostname(), "pid": os.getpid(),
@@ -347,8 +359,9 @@ def read_stream(stream: Path) -> list[dict]:
 
 def check_log(episodes: list[dict], log: list[dict]) -> None:
     """Refused unless every line of ``log`` is one episode's outcome, with that episode's
-    proposal and group, each episode has at most one line, and the episodes of each group that
-    the log holds are the group's first ones, in stream order."""
+    proposal and group and the invocation and attempts that ended it, each episode has at most
+    one line, and the episodes of each group that the log holds are the group's first ones, in
+    stream order."""
     by_id = {e["episode_id"]: e for e in episodes}
     problems, logged = [], set()
     for number, line in enumerate(log, 1):
@@ -368,6 +381,10 @@ def check_log(episodes: list[dict], log: list[dict]) -> None:
         elif line["ok"] is not True and (line["ok"] is not False
                                          or line["episode_uuid"] is not None):
             problems.append(f"line {number}: a failed episode with a uuid, or no ok")
+        elif not (type(line["invocation"]) is int and line["invocation"] >= 1
+                  and type(line["attempts"]) is int
+                  and line["attempts"] >= (1 if line["ok"] else 0)):
+            problems.append(f"line {number}: no invocation or no attempts")
         logged.add(line["episode_id"])
     if not problems:
         for group, members in by_group(episodes).items():
@@ -387,9 +404,11 @@ def pending(episodes: list[dict], log: list[dict]) -> list[dict]:
     return [e for e in episodes if e["episode_id"] not in logged]
 
 
-def plan_skips(episodes: list[dict], log: list[dict], skip: list[str]) -> list[dict]:
-    """The log lines of the episodes the operator skips, in the order given: each must be the
-    first episode of its group with no log line, the earlier skips counted; Refused otherwise."""
+def plan_skips(episodes: list[dict], log: list[dict], skip: list[str],
+               invocation: int) -> list[dict]:
+    """The log lines of the episodes the operator skips in ``invocation``, in the order given:
+    each must be the first episode of its group with no log line, the earlier skips counted;
+    Refused otherwise."""
     by_id = {e["episode_id"]: e for e in episodes}
     logged = {line["episode_id"] for line in log}
     lines = []
@@ -406,7 +425,7 @@ def plan_skips(episodes: list[dict], log: list[dict], skip: list[str]) -> list[d
         lines.append({"episode_id": episode_id, "proposal": e["proposal"],
                       "group_id": e["corpus"], "episode_uuid": None, "ok": False,
                       "error": SKIPPED, "started_at": utc_now(), "wall_s": 0.0,
-                      "text_chars": len(e["text"]), "attempts": 0})
+                      "text_chars": len(e["text"]), "attempts": 0, "invocation": invocation})
         logged.add(episode_id)
     return lines
 
@@ -451,29 +470,57 @@ def totals(lines: list[dict]) -> dict:
             "api_errors": sum(1 for line in lines if line.get("error"))}
 
 
+def attempt_outcome(line: dict, logged: dict[str, dict]) -> str:
+    """The outcome of the attempt that ``line``, a usage line of an episode, fell in, from the
+    episode's log line in ``logged`` (by episode id): ``ingested`` for the attempt that ingested
+    the episode; ``failed`` for one that failed, retried in place or the last of an episode
+    logged as failed; ``stopped`` for one whose invocation left the episode unlogged (a stop, a
+    crash or a kill), whatever a later invocation did with it; and ``unknown`` for a line that
+    names no attempt that the log can place. A resumed invocation numbers its attempts afresh, so
+    an attempt is named by its invocation and its number together."""
+    invocation, attempt = line.get("invocation"), line.get("attempt")
+    if type(invocation) is not int or type(attempt) is not int or attempt < 1:
+        return "unknown"
+    entry = logged.get(line["context"])
+    if entry is None or entry["invocation"] > invocation:
+        return "stopped"
+    if entry["invocation"] < invocation or attempt > entry["attempts"]:
+        return "unknown"
+    return "ingested" if entry["ok"] and attempt == entry["attempts"] else "failed"
+
+
 def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], record: dict, *,
               graphiti_core: str) -> dict:
     """summary.json: the run's stream (file name and SHA-256) and arm; the stream's ``episodes``
     and ``text_chars`` (code points of ``text``); the episodes ``ok`` (ingested) and ``failed``
     (logged as failed, skipped ones included); the ingestion attempts' ``input_tokens`` (cache
     tokens included), ``output_tokens``, ``calls`` (responses), ``api_errors`` (calls that
-    raised) and ``calls_over_100k_input`` (prompts beyond the price basis's 100,000 tokens), the
-    lines of every attempt counted, failed ones included; the same totals for the calls that
-    removing episodes made (``removal``) and for any other line (``unattributed``); ``wall_s``,
-    the sum of every episode's attempt time, which counts the two groups' time apart, and
+    raised), ``api_errors_by_outcome`` (those calls by the outcome of the attempt they fell in,
+    as ``attempt_outcome`` gives it) and ``calls_over_100k_input`` (prompts beyond the price
+    basis's 100,000 tokens), the lines of every attempt counted, failed ones included; the same
+    totals but the split for the calls that removing episodes made (``removal``) and for any
+    other line (``unattributed``); ``wall_s``, the sum of every episode's attempt time, which
+    counts the two groups' time apart, and
     ``elapsed_s``, the wall-clock time of the run's invocations, summed (an invocation that was
     killed has none); ``invocations``; ``exit``, the exit status of the last invocation, the one
     that wrote it; ``graphiti_core``; ``model``, the models of the usage lines (one name, or a
     list when there are several, null when there is no line); and ``images``, each image's IDs
     over the invocations. Each line is counted once."""
     ids = {e["episode_id"] for e in episodes}
-    outcome = {line["episode_id"]: line["ok"] for line in log if line["episode_id"] in ids}
+    logged = {line["episode_id"]: line for line in log if line["episode_id"] in ids}
+    outcome = {episode_id: line["ok"] for episode_id, line in logged.items()}
     ingestion, removal, unattributed = [], [], []
+    by_outcome = dict.fromkeys(ATTEMPT_OUTCOMES, 0)
     for line in usage_lines:
         context = line["context"]
-        (ingestion if context in ids else
-         removal if isinstance(context, str) and context.startswith(REMOVAL_CONTEXT)
-         else unattributed).append(line)
+        if context in ids:
+            ingestion.append(line)
+            if line.get("error"):
+                by_outcome[attempt_outcome(line, logged)] += 1
+        elif isinstance(context, str) and context.startswith(REMOVAL_CONTEXT):
+            removal.append(line)
+        else:
+            unattributed.append(line)
     models = sorted({line["model"] for line in usage_lines if line["model"]})
     invocations = record["invocations"]
     images = {name: sorted({invocation["images"][name] for invocation in invocations})
@@ -482,7 +529,7 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
             "stream_sha256": record["stream_sha256"], "episodes": len(episodes),
             "ok": sum(outcome.values()), "failed": len(outcome) - sum(outcome.values()),
             "text_chars": sum(len(e["text"]) for e in episodes),
-            **totals(ingestion),
+            **totals(ingestion), "api_errors_by_outcome": by_outcome,
             "calls_over_100k_input": sum(input_tokens(line) > PRICED_INPUT_TOKENS
                                          for line in ingestion),
             "removal": totals(removal), "unattributed": totals(unattributed),
@@ -543,9 +590,9 @@ async def check_store(engine, log: list[dict]) -> None:
 async def ingest_group(engine, group: str, episodes: list[dict],
                        states: dict[str, ProposalState], failures: dict[str, int], stop: Stop,
                        log_path: Path, key_file: str, delays: tuple[float, ...],
-                       progress: Callable[[str], None]) -> None:
+                       progress: Callable[[str], None], *, invocation: int) -> None:
     """Ingests ``episodes``, one group's, one at a time in their order (the module's
-    description)."""
+    description), in the run's ``invocation``."""
     for number, e in enumerate(episodes, 1):
         if stop.code is not None:
             return
@@ -554,12 +601,12 @@ async def ingest_group(engine, group: str, episodes: list[dict],
         while True:
             attempts += 1
             start = time.monotonic()
-            token = usage.usage_context.set(e["episode_id"])
             try:
-                arguments = adapter.episode_arguments(
-                    e, previous_episode_uuids=list(state.window),
-                    saga_previous_episode_uuid=state.saga_previous, source=engine.source)
-                uuid = await engine.add_episode(**arguments)
+                with usage.attributed(e["episode_id"], invocation, attempts):
+                    arguments = adapter.episode_arguments(
+                        e, previous_episode_uuids=list(state.window),
+                        saga_previous_episode_uuid=state.saga_previous, source=engine.source)
+                    uuid = await engine.add_episode(**arguments)
             except Exception as raised:  # noqa: BLE001 - classified below, and never lost
                 if infrastructure := infrastructure_error(raised):
                     stop.request(EXIT_STOPPED, f"{e['episode_id']} (attempt {attempts}): "
@@ -570,7 +617,6 @@ async def ingest_group(engine, group: str, episodes: list[dict],
                     return
                 error = error_text(raised, key_file)
             finally:
-                usage.usage_context.reset(token)
                 spent += time.monotonic() - start
             if uuid is not None:
                 break
@@ -597,7 +643,7 @@ async def ingest_group(engine, group: str, episodes: list[dict],
                                "group_id": e["corpus"], "episode_uuid": uuid,
                                "ok": uuid is not None, "error": error, "started_at": started_at,
                                "wall_s": round(spent, 3), "text_chars": len(e["text"]),
-                               "attempts": attempts})
+                               "attempts": attempts, "invocation": invocation})
         if uuid is not None:
             state.ingested(uuid)
             failures[group] = 0
@@ -712,7 +758,9 @@ async def _run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: d
                   "invocations": []}
     log = read_jsonl(log_path)
     check_log(episodes, log)
-    skip_lines = plan_skips(episodes, log, skip)
+    # This invocation's place in run.json, which the lock keeps from changing meanwhile.
+    number = len(record["invocations"]) + 1
+    skip_lines = plan_skips(episodes, log, skip, number)
     invocation = {"command": "ingest", "started_at": utc_now(), "resume": resume, "skipped": [],
                   "images": dict(images), "elapsed_s": None, "exit": None, "stop": None,
                   "crash": None}
@@ -741,7 +789,8 @@ async def _run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: d
             async with asyncio.TaskGroup() as tasks:
                 for group, members in groups.items():
                     tasks.create_task(ingest_group(engine, group, members, states, failures,
-                                                   stop, log_path, key_file, delays, progress))
+                                                   stop, log_path, key_file, delays, progress,
+                                                   invocation=number))
         finally:
             await engine.close()
         log = read_jsonl(log_path)
@@ -758,7 +807,10 @@ async def _run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: d
             progress(f"ingest: stopped (exit {code}): {stop.reason}")
         progress(f"ingest: {summary['ok']} of {summary['episodes']} episodes ingested, "
                  f"{summary['failed']} failed; {summary['calls']} model calls and "
-                 f"{summary['api_errors']} that raised, {summary['input_tokens']} input and "
+                 f"{summary['api_errors']} that raised (by the outcome of their attempt: "
+                 + ", ".join(f"{name} {count}" for name, count
+                             in summary["api_errors_by_outcome"].items())
+                 + f"), {summary['input_tokens']} input and "
                  f"{summary['output_tokens']} output tokens; summary in {SUMMARY}")
         return code
 
@@ -778,9 +830,9 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
     stopped. It works on a run's output directory, under the run's lock, after the network check
     (remove_episode rebuilds the summaries of the entities the episode mentioned with the
     construction model), records its model calls in the run's usage log under
-    ``remove-episode:<episode id>`` and its invocation in run.json. Returns the exit status: 0
-    when every uuid is removed, 2 when one is not in the store; Refused for a uuid the log
-    records as ingested."""
+    ``remove-episode:<episode id>``, with its invocation and no attempt, and records its
+    invocation in run.json. Returns the exit status: 0 when every uuid is removed, 2 when one is
+    not in the store; Refused for a uuid the log records as ingested."""
     if not out_dir.is_dir():
         raise Refused(f"{out_dir} is not a directory")
     with hold_lock(out_dir, "remove-episodes"), cancelled_on_sigterm():
@@ -793,6 +845,7 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
         if refused := sorted(set(uuids) & ingested_uuids(out_dir)):
             raise Refused(f"the log records {', '.join(refused)} as ingested; only an episode it "
                           "does not record is removed")
+        number = len(record["invocations"]) + 1
         invocation = {"command": "remove-episodes", "started_at": utc_now(),
                       "uuids": list(uuids), "removed": [], "images": dict(images),
                       "elapsed_s": None, "exit": None, "stop": None, "crash": None}
@@ -811,11 +864,8 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
                         progress(f"remove-episodes: the store holds no episode {uuid}")
                         status = EXIT_STOPPED
                         continue
-                    token = usage.usage_context.set(f"{REMOVAL_CONTEXT}{stored[uuid]['name']}")
-                    try:
+                    with usage.attributed(f"{REMOVAL_CONTEXT}{stored[uuid]['name']}", number):
                         await engine.remove_episode(uuid)
-                    finally:
-                        usage.usage_context.reset(token)
                     invocation["removed"].append(uuid)
                     progress(f"remove-episodes: removed {uuid} ({stored[uuid]['name']})")
             finally:

@@ -237,7 +237,8 @@ def test_grep_at_d_s_config_records_what_the_code_sends_and_runs():
     assert installed["sandbox"]["base_image"] == BASE_IMAGE
     assert installed["sandbox"]["debian_snapshot"] == SNAPSHOT
     # The version of each package that the sandbox's build lists with dpkg-query, and of no
-    # other, as the build installed it from the snapshot that fixes it.
+    # other, as the build installed it from the base image or the snapshot, which are one state
+    # of the archive.
     (listed,) = re.findall(r"dpkg-query -W -f '\$\{Package\}=\$\{Version\}\\n' ([a-z0-9 ]+)$",
                            SANDBOX_DOCKERFILE, re.M)
     versions = installed["sandbox"]["package_versions"]

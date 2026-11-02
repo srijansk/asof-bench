@@ -177,10 +177,19 @@ def test_the_data_format_page_names_the_stream_and_answer_row_fields_the_code_ho
     assert rows == set(ROW_FIELDS) | set(ACCOUNTING)
 
 
-def ci_steps() -> list[str]:
-    """The commands of CI's workflow, one for each ``- run:`` step, in its order."""
-    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-    return re.findall(r"^\s*- run: (.+)$", workflow, re.MULTILINE)
+def ci_steps(workflow: str | None = None) -> list[str]:
+    """The commands of CI's workflow (or of ``workflow``), one for each step's ``run:``, whether
+    the step begins with it (``- run:``) or names itself first (``- name:``, then ``run:``), in
+    its order."""
+    if workflow is None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    return re.findall(r"^\s*(?:- )?run: (.+)$", workflow, re.MULTILINE)
+
+
+def test_ci_steps_reads_a_step_that_names_itself_first():
+    workflow = ("    steps:\n      - run: one\n      - name: Two\n        run: two\n"
+                "      - uses: x\n")
+    assert ci_steps(workflow) == ["one", "two"]
 
 
 def development_commands() -> list[str]:

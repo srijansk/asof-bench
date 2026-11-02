@@ -163,7 +163,7 @@
     "image": "asofbench/sandbox, built from grep-at-d/sandbox/Dockerfile with that directory as the context; its build ends with the command server's self-test, run with no network",
     "base_image": "debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04",
     "debian_snapshot": "20261027T000000Z",
-    "packages": "bash, coreutils, grep, findutils and sed from the base image, Debian's essential packages, and gawk and python3, for the command server, with their dependencies from http://snapshot.debian.org/archive/debian/20261027T000000Z (trixie and trixie-updates) and http://snapshot.debian.org/archive/debian-security/20261027T000000Z (trixie-security), the archive as it stood when the base image was built, and from no other source. The versions installed are the snapshot's: the base image too was built from the archive as it stood at 20261027T000000Z (its history's debuerreotype timestamp, @1793059200), so the snapshot pin fixes every one of them and a rebuild installs the same; the build's dpkg-query lists them, and installed.sandbox.package_versions records them",
+    "packages": "bash, coreutils, grep, findutils and sed from the base image, Debian's essential packages, and gawk and python3, for the command server, with their dependencies from http://snapshot.debian.org/archive/debian/20261027T000000Z (trixie and trixie-updates) and http://snapshot.debian.org/archive/debian-security/20261027T000000Z (trixie-security), the archive as it stood when the base image was built, and from no other source. The versions installed are the snapshot's: the base image too was built from the archive as it stood at 20261027T000000Z (its history's debuerreotype timestamp, @1793059200), so the base image's digest fixes the five packages it brings, the snapshot pin fixes gawk, python3 and their dependencies, both name one state of the archive, and a rebuild installs the same; the build's dpkg-query lists the seven named packages, and installed.sandbox.package_versions records their versions",
     "user": "uid 10001, not root",
     "root_filesystem": "read-only (read_only: true)",
     "repo": "the date's tree, a read-only bind mount at /repo of the fresh directory that asofbench materialize wrote, which holds the proposal files and git-log.txt and nothing else",
@@ -249,7 +249,7 @@
     "sandbox": {
       "base_image": "debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04",
       "debian_snapshot": "20261027T000000Z",
-      "packages": "bash, coreutils, grep, findutils and sed from the base image, and gawk and python3 and their dependencies from the snapshot, at the versions that package_versions records (sandbox.packages)",
+      "packages": "bash, coreutils, grep, findutils and sed from the base image, and gawk and python3, with their dependencies, from the snapshot; package_versions records the versions of these seven packages (sandbox.packages)",
       "package_versions": {
         "bash": "5.2.37-2+b10",
         "coreutils": "9.7-3",

@@ -250,6 +250,74 @@ def test_every_other_request_is_refused_and_runs_nothing(live, tree):
     assert post(live, {"command": longest})[0] == 200
 
 
+def test_http_server_s_own_refusals_answer_in_json_too(live):
+    def refusal(request: bytes) -> tuple[bytes, dict]:
+        head, _, body = raw(live, request).partition(b"\r\n\r\n")
+        return head.split(b"\r\n", 1)[0], json.loads(body)
+
+    # A method that HTTP does not define, a request line that is not one, and HTTP/0.9 requests,
+    # which http.server answers with no status line: each a status line and a JSON body.
+    for request, status in ((b"FOO /run HTTP/1.1\r\nHost: sandbox\r\n\r\n", b"501"),
+                            (b"GARBAGE\r\n\r\n", b"400"),
+                            (b"POST /run\r\n\r\n", b"400"),
+                            (b"GET /run\r\n\r\n", b"405")):
+        line, body = refusal(request)
+        assert line.startswith(b"HTTP/1.0 " + status + b" "), (request[:20], line)
+        assert set(body) == {"error"} and isinstance(body["error"], str), request[:20]
+
+
+def test_commands_run_in_the_order_they_arrive(live, tree):
+    root, _ = tree
+    log = root.parent / "arrivals"
+    results = []
+
+    def send(command: str) -> None:
+        results.append(post(live, {"command": command}))
+
+    # The first command holds the sandbox while the others arrive one after another; each then
+    # runs in its turn, whatever order the waiting threads would be woken in.
+    first = threading.Thread(target=send, args=(f'sleep 0.5; echo first >> "{log}"',))
+    first.start()
+    time.sleep(0.2)
+    threads = []
+    for n in range(6):
+        thread = threading.Thread(target=send, args=(f'echo {n} >> "{log}"',))
+        thread.start()
+        threads.append(thread)
+        # Until the server has taken this request's ticket, the next does not leave.
+        deadline = time.monotonic() + 5
+        while live.turnstile.tickets() < n + 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+    for thread in [first, *threads]:
+        thread.join()
+    assert [status for status, _ in results] == [200] * 7
+    assert log.read_text(encoding="utf-8").split() == ["first", *map(str, range(6))]
+    # Each command took its ticket from the server's turnstile, which serves them in that order
+    # (a lock alone may wake its waiters in any order, though it often happens not to).
+    assert live.turnstile.tickets() == 7
+
+
+def test_the_turnstile_lets_its_waiters_in_by_their_tickets():
+    turnstile, entered = server.Turnstile(), []
+
+    def wait(n: int) -> None:
+        with turnstile.turn():
+            entered.append(n)
+
+    with turnstile.turn():
+        threads = []
+        for n in range(8):
+            threads.append(threading.Thread(target=wait, args=(n,)))
+            threads[-1].start()
+            deadline = time.monotonic() + 5
+            while turnstile.tickets() < n + 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+        assert entered == []
+    for thread in threads:
+        thread.join()
+    assert entered == list(range(8))
+
+
 def test_commands_run_one_at_a_time(live, tree):
     root, _ = tree
     log = root.parent / "order"

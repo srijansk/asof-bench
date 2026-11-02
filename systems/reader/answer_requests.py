@@ -3,7 +3,7 @@
 keyed as the request is. The reader image runs the single-call entrants, closed book first.
 
     answer_requests --requests /input/requests.jsonl --out /output/responses.jsonl \\
-        --model claude-haiku-5-5|claude-sonnet-5-5 [--resume]
+        --model claude-haiku-5-5|claude-sonnet-5-5 [--resume] [--api-errors-before N]
 
 Grep at D's agent (grep-at-d/agent.py), which the image holds too, answers through this runner:
 its command, ``grep_at_d``, is ``main`` with the agent's answering function, which runs a request's
@@ -47,7 +47,12 @@ responses and no other starts:
   a run that stopped this way for a cause of the run is discarded and run again in a new run
   directory once the cause is fixed, never resumed under changed settings. A resumed run counts on
   from the ``api_error`` responses at the end of the responses file, as Graphiti's ingestion
-  counts on from its log.
+  counts on from its log. ``--api-errors-before N`` (0 by default) is the count of ``api_error``
+  responses in a row that the runs before this one ended with, for an entrant whose run is made
+  of several, as grep at D's is of one run per date (grep-at-d/run_dates.py gives it): the count
+  goes on from it, through this run's own responses while every one of them is an ``api_error``,
+  so that the stop fires wherever the fifth in a row falls, and run.json's ``stop`` then records
+  it as ``api_errors_before``.
 
 ``--resume`` checks that the requests file, the responses file and the model are those that the
 run began with, drops the unfinished last line that an interrupted invocation can leave in the
@@ -199,14 +204,16 @@ def scan_requests(path: Path) -> list[str]:
     return keys
 
 
-def trailing_api_errors(responses: list[dict]) -> int:
-    """The ``api_error`` responses in a row at the end of ``responses``, in their order."""
+def trailing_api_errors(responses: list[dict], before: int = 0) -> int:
+    """The ``api_error`` responses in a row at the end of ``responses``, in their order, counting
+    on from ``before``, the ``api_error`` responses in a row that came before them, while every one
+    of ``responses`` is an ``api_error``."""
     count = 0
     for response in reversed(responses):
         if response["error"] != "api_error":
-            break
+            return count
         count += 1
-    return count
+    return count + before
 
 
 def open_client(usage_log: usage.UsageLog, key_file: str = llm.KEY_FILE):
@@ -231,11 +238,11 @@ def netcheck_preflight(out_dir: Path,
 async def answer_pending(client, model: str, requests: Path, answered: set[str], stop: Stop,
                          out: Path, ask: Callable[..., Awaitable[dict]], key_file: str,
                          progress: Callable[[str], None], *, invocation: int, total: int,
-                         concurrency: int, api_errors: int) -> None:
+                         concurrency: int, api_errors: int, api_errors_before: int = 0) -> None:
     """Answers each request of ``requests`` that ``answered`` does not hold, in the file's order,
     ``concurrency`` at a time, and appends its response to ``out``, until a stop is requested (the
     module's description); ``api_errors`` is the count of ``api_error`` responses in a row that
-    the responses file ends with."""
+    the responses file ends with, the runs before this one's (``api_errors_before``) included."""
     pending = (request for request in requests_of(requests) if request["key"] not in answered)
     in_a_row = api_errors
 
@@ -269,7 +276,9 @@ async def answer_pending(client, model: str, requests: Path, answered: set[str],
                              "that every request shares, such as a setting that the API "
                              "rejects, would give one to every request left; discard the run "
                              f"and run it again in a new run directory once it is fixed ({README})",
-                             {"error": f"{in_a_row} consecutive api_error responses"})
+                             {"error": f"{in_a_row} consecutive api_error responses",
+                              **({"api_errors_before": api_errors_before}
+                                 if api_errors_before else {})})
 
     try:
         async with asyncio.TaskGroup() as tasks:
@@ -284,23 +293,27 @@ async def run(requests: Path, out: Path, model: str, *, resume: bool, images: di
               ask: Callable[..., Awaitable[dict]] = answer.answer_once,
               preflight: Callable[[Path], int] | None = netcheck_preflight,
               key_file: str = llm.KEY_FILE, concurrency: int = CONCURRENCY,
-              progress: Callable[[str], None] = print) -> int:
+              progress: Callable[[str], None] = print, api_errors_before: int = 0) -> int:
     """One invocation of an answering run (the module's description); Refused when it cannot
     start."""
     if model not in answer.MODELS:
         raise Refused(f"--model {model!r} is not an answering model ({', '.join(answer.MODELS)})")
+    if api_errors_before < 0:
+        raise Refused(f"api_errors_before {api_errors_before} is not a count")
     if not out.parent.is_dir():
         raise Refused(f"{out.parent} is not a directory")
     plumbing.check_key_file(key_file, README)
     with hold_lock(out.parent, "answer", readme=README), cancelled_on_sigterm():
         return await _run(requests, out, model, resume=resume, images=images,
                           open_client=open_client, ask=ask, preflight=preflight,
-                          key_file=key_file, concurrency=concurrency, progress=progress)
+                          key_file=key_file, concurrency=concurrency, progress=progress,
+                          api_errors_before=api_errors_before)
 
 
 async def _run(requests: Path, out: Path, model: str, *, resume: bool, images: dict[str, str],
                open_client: Callable, ask: Callable[..., Awaitable[dict]], preflight,
-               key_file: str, concurrency: int, progress: Callable[[str], None]) -> int:
+               key_file: str, concurrency: int, progress: Callable[[str], None],
+               api_errors_before: int) -> int:
     begun = time.monotonic()
     out_dir = out.parent
     usage_path, run_path = out_dir / USAGE, out_dir / RUN
@@ -339,13 +352,16 @@ async def _run(requests: Path, out: Path, model: str, *, resume: bool, images: d
             return EXIT_STOPPED
         stop = Stop()
         progress(f"answer: {len(keys) - len(answered)} of the {len(keys)} requests to answer with "
-                 f"{model}, {concurrency} at a time")
+                 f"{model}, {concurrency} at a time"
+                 + (f", after {api_errors_before} api_error responses in a row in the runs "
+                    "before this one" if api_errors_before else ""))
         client = open_client(usage.UsageLog(str(usage_path)), key_file)
         try:
             await answer_pending(client, model, requests, answered, stop, out, ask, key_file,
                                  progress, invocation=number, total=len(keys),
                                  concurrency=concurrency,
-                                 api_errors=trailing_api_errors(responses))
+                                 api_errors=trailing_api_errors(responses, api_errors_before),
+                                 api_errors_before=api_errors_before)
         finally:
             await client.close()
         responses = read_jsonl(out)
@@ -362,6 +378,13 @@ async def _run(requests: Path, out: Path, model: str, *, resume: bool, images: d
                  f"{sum(response['tokens_in'] for response in responses)} input and "
                  f"{sum(response['tokens_out'] for response in responses)} output tokens")
         return code
+
+
+def count(text: str) -> int:
+    """A count given on the command line: a whole number, 0 or more."""
+    if not text.isdigit():
+        raise argparse.ArgumentTypeError(f"{text!r} is not a count of 0 or more")
+    return int(text)
 
 
 def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
@@ -381,6 +404,10 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
     parser.add_argument("--model", choices=answer.MODELS, help="the answering model")
     parser.add_argument("--resume", action="store_true",
                         help="answer the requests that have no response yet")
+    parser.add_argument("--api-errors-before", type=count, default=0, dest="api_errors_before",
+                        metavar="N", help="the api_error responses in a row that the runs before "
+                        "this one ended with, which this run counts on from (0 by default; "
+                        "grep at D's run_dates.py gives it)")
     parser.add_argument("--self-test", action="store_true",
                         help="check the installation and the answering call, with no network")
     args = parser.parse_args(argv)
@@ -398,7 +425,8 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
     try:
         images = parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"), image_names)
         return asyncio.run(run(args.requests, args.out, args.model, resume=args.resume,
-                               images=images, ask=ask, preflight=preflight))
+                               images=images, ask=ask, preflight=preflight,
+                               api_errors_before=args.api_errors_before))
     except Refused as refusal:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return EXIT_STOPPED

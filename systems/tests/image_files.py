@@ -79,6 +79,31 @@ def shared_files_needed(entries: list[Path], package: Path) -> set[str]:
     return needed
 
 
+def package_files_needed(entry: Path, package: str, directory: Path) -> set[str]:
+    """The modules of the package ``package``, whose files are in ``directory``, that the module
+    at ``entry`` imports, at any depth of its code, and those that those import in turn, with
+    ``entry``'s own file when it is in ``directory``: the files of ``directory`` that an image
+    that runs ``entry`` needs."""
+    needed = {entry.name} if entry.parent == directory else set()
+    pending = [entry]
+    while pending:
+        for node in ast.walk(ast.parse(pending.pop().read_text(encoding="utf-8"))):
+            names = []
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == package:
+                names = [alias.name for alias in node.names]
+            elif (isinstance(node, ast.ImportFrom) and node.level == 0
+                  and (node.module or "").startswith(f"{package}.")):
+                names = [node.module.split(".")[1]]
+            elif isinstance(node, ast.Import):
+                names = [alias.name.split(".")[1] for alias in node.names
+                         if alias.name.startswith(f"{package}.")]
+            for name in names:
+                if f"{name}.py" not in needed:
+                    needed.add(f"{name}.py")
+                    pending.append(directory / f"{name}.py")
+    return needed
+
+
 def shared_file_differences(dockerfile: str, needed: set[str]) -> tuple[set[str], set[str]]:
     """The needed shared files that the Dockerfile does not copy, and those it copies that are
     not needed."""

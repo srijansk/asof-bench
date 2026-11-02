@@ -1,24 +1,25 @@
 # Grep at D's run environment for one arm and date (systems/README.md): the egress proxy and the
-# agent, in the reader image, on `inner`, an internal network with no route out and no address of
-# the host on it, the proxy alone also on `outer`; and the sandbox, which runs the agent's
-# commands, on `sandbox_net` alone, an internal network that only it and the agent share. The
-# sandbox holds the date's tree read-only at /repo and nothing else of the host: no secret, no
-# other mount, no capability, a read-only root and a 16 MiB tmpfs at /tmp. run_dates.py runs one
-# compose project for each date, and takes it down before the next:
+# agent, in grep at D's image (built FROM the reader's), on `inner`, an internal network with no
+# route out and no address of the host on it, the proxy alone also on `outer`; and the sandbox,
+# which runs the agent's commands, on `sandbox_net` alone, an internal network that only it and
+# the agent share. The sandbox holds the date's tree read-only at /repo and nothing else of the
+# host: no secret, no other mount, no capability, a read-only root and a 16 MiB tmpfs at /tmp.
+# run_dates.py runs one compose project for each date, and takes it down before the next:
 #
 #     ASOFBENCH_RUN_INPUT=<the date's input/<file>/, which holds its requests.jsonl alone> \
 #     ASOFBENCH_RUN_OUTPUT=<the date's output/<file>/> \
 #     ASOFBENCH_RUN_TREE=<the date's tree, which asofbench materialize wrote> \
 #     ASOFBENCH_ANTHROPIC_KEY_FILE=<the file that holds the API key> \
-#     ASOFBENCH_IMAGE_IDS=<reader=sha256:...,egress=sha256:...,sandbox=sha256:...> \
+#     ASOFBENCH_IMAGE_IDS=<grep-at-d=sha256:...,reader=sha256:...,egress=sha256:...,sandbox=sha256:...> \
 #     docker compose -f systems/grep-at-d/compose.yaml -p asofbench-grep-at-d-<run> \
 #         run --rm agent grep_at_d --requests /input/requests.jsonl \
-#         --out /output/responses.jsonl --model claude-haiku-5-5
+#         --out /output/responses.jsonl --model claude-haiku-5-5 --api-errors-before <n>
 #
 # The first four variables are absolute paths (compose reads a relative one from this file's
 # directory) and are needed by every compose command on this file, `down` included. The key
 # reaches the agent's container only as the Docker secret /run/secrets/anthropic_api_key. The
-# image IDs are recorded in the date's run.json; the agent refuses to start without them.
+# image IDs, grep at D's own and the reader's that it is built from among them, are recorded in
+# the date's run.json; the agent refuses to start without them.
 #
 # Each service has a memory limit, and each is the first that the kernel stops if the machine runs
 # short of memory (oom_score_adj). The proxy restarts when it stops without a `docker stop`; the
@@ -65,10 +66,10 @@ services:
     oom_score_adj: 1000
 
   agent:
-    image: asofbench/reader
+    image: asofbench/grep-at-d
     build:
       context: ..
-      dockerfile: reader/Dockerfile
+      dockerfile: grep-at-d/Dockerfile
     environment:
       HTTPS_PROXY: http://egress:3128
       ASOFBENCH_IMAGE_IDS: ${ASOFBENCH_IMAGE_IDS:-}

@@ -1,10 +1,12 @@
 """How grep at D is put together (systems/grep-at-d): its compose file (the egress service as the
 reader's, the sandbox on sandbox_net alone with the tree read-only at /repo, a read-only root, a
-16 MiB tmpfs at /tmp, no capability and no secret, and the agent, in the reader image, on inner
-and sandbox_net); the sandbox's Dockerfile (debian:stable-slim pinned by digest, gawk and python3
-from a fixed snapshot of the Debian archive, a user that is not root, the command server and its
-self-test with no network); and its config.json against the code it records. Standard library
-only, with packaging, which pytest installs."""
+16 MiB tmpfs at /tmp, no capability and no secret, and the agent, in grep at D's image, on inner
+and sandbox_net); grep at D's image, the reader image with the agent's files added and no others,
+every module that they import being the reader image's; the sandbox's Dockerfile
+(debian:stable-slim pinned by digest, gawk and python3 from a fixed snapshot of the Debian
+archive, a user that is not root, the command server and its self-test with no network); and its
+config.json against the code it records, and against closed book's where the two share the reader
+image. Standard library only, with packaging, which pytest installs."""
 
 from __future__ import annotations
 
@@ -14,7 +16,14 @@ from pathlib import Path
 
 import grep_modules
 from asofbench_systems import answer, llm
-from image_files import block, items
+from image_files import (
+    block,
+    copied_python_files,
+    copied_shared_files,
+    items,
+    package_files_needed,
+    shared_files_needed,
+)
 from reader import answer_requests as reader
 
 agent = grep_modules.agent()
@@ -22,6 +31,10 @@ server = grep_modules.command_server()
 
 SYSTEMS = Path(__file__).resolve().parents[1]
 GREP_AT_D = SYSTEMS / "grep-at-d"
+READER = SYSTEMS / "reader"
+PACKAGE = SYSTEMS / "common" / "asofbench_systems"
+DOCKERFILE = (GREP_AT_D / "Dockerfile").read_text(encoding="utf-8")
+READER_DOCKERFILE = (READER / "Dockerfile").read_text(encoding="utf-8")
 COMPOSE = (GREP_AT_D / "compose.yaml").read_text(encoding="utf-8")
 SANDBOX_DOCKERFILE = (GREP_AT_D / "sandbox" / "Dockerfile").read_text(encoding="utf-8")
 CONFIG = json.loads((GREP_AT_D / "config.json").read_text(encoding="utf-8"))
@@ -57,12 +70,14 @@ def test_the_sandbox_is_on_sandbox_net_alone_with_the_tree_read_only_and_nothing
         assert not any(line.strip().startswith(key) for line in service), key
 
 
-def test_the_agent_runs_in_the_reader_image_on_inner_and_sandbox_net():
+def test_the_agent_runs_in_grep_at_d_s_image_on_inner_and_sandbox_net():
     reader_compose = (SYSTEMS / "reader" / "compose.yaml").read_text(encoding="utf-8")
     # The egress service as the reader's (and so Graphiti's), to the letter.
     assert block(COMPOSE, "egress", 2) == block(reader_compose, "egress", 2)
     service = block(COMPOSE, "agent", 2)
-    assert "    image: asofbench/reader" in service
+    assert "    image: asofbench/grep-at-d" in service
+    assert block("\n".join(service), "build", 4)[1:] == ["      context: ..",
+                                                         "      dockerfile: grep-at-d/Dockerfile"]
     assert items(service, "networks") == ["inner", "sandbox_net"]
     assert items(service, "volumes") == ["${ASOFBENCH_RUN_INPUT:?}:/input:ro",
                                          "${ASOFBENCH_RUN_OUTPUT:?}:/output"]
@@ -91,6 +106,40 @@ def test_the_agent_runs_in_the_reader_image_on_inner_and_sandbox_net():
     # The proxy alone is on outer: the sandbox reaches neither it nor the API.
     assert [name for name in ("egress", "sandbox", "agent")
             if "outer" in items(block(COMPOSE, name, 2), "networks")] == ["egress"]
+
+
+def test_grep_at_d_s_image_is_the_reader_s_with_the_agent_s_files_and_no_others():
+    # Built FROM the reader image by its local tag, whose ID each run records with its own.
+    assert re.findall(r"^FROM (\S+)$", DOCKERFILE, re.M) == ["asofbench/reader"]
+    own = package_files_needed(GREP_AT_D / "agent.py", "grep_at_d", GREP_AT_D)
+    # The agent imports its self-test (for --self-test), which imports the agent back.
+    assert own == {"agent.py", "selftest.py"}
+    assert copied_python_files(DOCKERFILE, "grep-at-d") == own
+    assert "COPY grep-at-d/agent.py grep-at-d/selftest.py /app/grep_at_d/\n" in DOCKERFILE
+    # Nothing that the reader image holds is copied again, and nothing of the sandbox's.
+    assert copied_shared_files(DOCKERFILE) == set()
+    assert copied_python_files(DOCKERFILE, "reader") == set()
+    assert copied_python_files(DOCKERFILE, "env") == set()
+    assert "sandbox" not in "".join(line for line in DOCKERFILE.splitlines()
+                                    if line.startswith("COPY"))
+    # Every module that the agent and its self-test import, and those import in turn, is one
+    # that the reader image copies.
+    entries = [GREP_AT_D / name for name in sorted(own)]
+    reader_own = set().union(*(package_files_needed(entry, "reader", READER)
+                               for entry in entries))
+    assert reader_own == {"answer_requests.py", "selftest.py"}
+    assert reader_own <= copied_python_files(READER_DOCKERFILE, "reader")
+    shared = shared_files_needed([*entries, *(READER / name for name in sorted(reader_own))],
+                                 PACKAGE)
+    assert {"__init__.py", "answer.py", "llm.py", "run.py", "usage.py"} <= shared
+    assert shared <= copied_shared_files(READER_DOCKERFILE)
+    # The command that every run uses, the user it runs as, and the self-test with no network
+    # after the user is set.
+    assert 'exec python -m grep_at_d.agent "$@"' in DOCKERFILE
+    user = DOCKERFILE.index("\nUSER 10001:10001\n")
+    assert DOCKERFILE.index("\nUSER root\n") < DOCKERFILE.index("\nCOPY grep-at-d/") < user
+    assert user < DOCKERFILE.index("\nRUN --network=none grep_at_d --self-test\n")
+    assert DOCKERFILE.rstrip().endswith('CMD ["grep_at_d", "--help"]')
 
 
 def test_the_sandbox_image_is_debian_stable_slim_by_digest_with_the_tools_and_no_root():
@@ -141,6 +190,14 @@ def test_grep_at_d_s_config_records_what_the_code_sends_and_runs():
     assert (sandbox["tmpfs_bytes"], sandbox["pids_limit"], sandbox["port"]) == (
         TMPFS_BYTES, PIDS_LIMIT, server.PORT)
     assert sandbox["client_timeout_s"] == agent.SANDBOX_TIMEOUT_S
+    # What the commands may use, and how their output is read, in the command server's words.
+    assert all(tool in sandbox["tools"] for tool in ("python3", "gawk", "bash", "grep", "sed"))
+    read_as = "read as UTF-8 with each byte that is not UTF-8 replaced by U+FFFD"
+    assert read_as in sandbox["commands"] and read_as in " ".join(server.__doc__.split())
+    assert "turns thinking off" not in CONFIG["answering"]["tool_choice"]
+    # The stop after api_error responses in a row spans the dates.
+    assert "--api-errors-before" in CONFIG["run"]["api_errors_across_dates"]
+    assert "api_errors_before" in CONFIG["run"]["api_errors_across_dates"]
     run = CONFIG["run"]
     assert (run["concurrency"], run["max_retries"], run["timeout_s"],
             run["max_consecutive_api_errors"]) == (reader.CONCURRENCY, reader.MAX_RETRIES,
@@ -155,13 +212,26 @@ def test_grep_at_d_s_config_records_what_the_code_sends_and_runs():
     assert policy["provider_side_tools"].startswith("none")
     (idle,) = re.findall(r'^\s+EGRESS_IDLE_TIMEOUT:\s*"([0-9]+)"$', COMPOSE, re.M)
     assert policy["proxy"]["idle_timeout_s"] == int(idle) > reader.TIMEOUT_S
-    # The reader image, as the single-call entrants record it, and the sandbox's image.
+    # What is installed: grep at D's own images, and, as closed book records them, what the two
+    # genuinely share, the reader image's Python, base image and packages and the proxy's image.
+    installed = CONFIG["installed"]
     closed = json.loads((SYSTEMS / "closed-book" / "config.json").read_text(encoding="utf-8"))
-    assert CONFIG["installed"]["reader"] == closed["installed"]
-    lock = (SYSTEMS / "reader" / "requirements.txt").read_text(encoding="utf-8")
-    assert CONFIG["installed"]["reader"]["python_packages"] == {
+    for shared_entry in ("python", "base_image", "python_packages"):
+        assert installed[shared_entry] == closed["installed"][shared_entry], shared_entry
+    (reader_base,) = re.findall(r"^FROM (\S+) AS deps$", READER_DOCKERFILE, re.M)
+    assert installed["base_image"] == reader_base
+    lock = (READER / "requirements.txt").read_text(encoding="utf-8")
+    assert installed["python_packages"] == {
         name: version for name, version, marker in PIN.findall(lock) if not marker.strip()}
-    assert CONFIG["installed"]["sandbox"]["base_image"] == BASE_IMAGE
+    assert set(installed["images"]) == {"asofbench/grep-at-d", "asofbench/reader",
+                                        "asofbench/egress", "asofbench/sandbox"}
+    assert installed["images"]["asofbench/egress"] == closed["installed"]["images"][
+        "asofbench/egress"]
+    assert "FROM asofbench/reader" in installed["images"]["asofbench/grep-at-d"]
+    assert "grep_at_d --self-test" in installed["images"]["asofbench/grep-at-d"]
+    assert installed["sandbox"]["base_image"] == BASE_IMAGE
+    assert installed["sandbox"]["debian_snapshot"] == SNAPSHOT
+    assert all(name in installed["per_run"] for name in ("grep at D's", "the reader's"))
     assert CONFIG["requests"]["fields"] == ["key", "question"]
     text = (GREP_AT_D / "config.json").read_text(encoding="utf-8")
     assert str(SYSTEMS.parent.resolve()) not in text and str(Path.home()) not in text

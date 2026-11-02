@@ -52,8 +52,8 @@ QUESTION = ("What was the status of PEP 1 (\"Proposal 1\") as of the end of 2001
             "Answer with exactly one value from: Draft, Final.")
 USAGE = {"input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 3,
          "cache_read_input_tokens": 5}
-IMAGES = {"reader": "sha256:" + "1" * 64, "egress": "sha256:" + "2" * 64,
-          "sandbox": "sha256:" + "3" * 64}
+IMAGES = {"grep-at-d": "sha256:" + "4" * 64, "reader": "sha256:" + "1" * 64,
+          "egress": "sha256:" + "2" * 64, "sandbox": "sha256:" + "3" * 64}
 # The registered strings and tool, written out again here, so that an edit to agent.py that
 # changes what the model is sent fails here and not only in a comparison with itself.
 REGISTERED_PROMPT = (
@@ -386,19 +386,22 @@ def test_grep_at_d_s_network_check_waits_for_the_proxy_and_the_sandbox(tmp_path,
                          "--report", str(tmp_path / "netcheck.json")]]
 
 
-def test_grep_at_d_s_images_are_the_reader_the_proxy_and_the_sandbox(tmp_path, monkeypatch,
-                                                                     capsys):
-    assert agent.IMAGE_NAMES == ("reader", "egress", "sandbox")
+def test_grep_at_d_s_images_are_its_own_the_reader_s_the_proxy_s_and_the_sandbox_s(tmp_path,
+                                                                                  monkeypatch,
+                                                                                  capsys):
+    # Its own image, and the reader image that it is built from, beside the proxy's and the
+    # sandbox's.
+    assert agent.IMAGE_NAMES == ("grep-at-d", "reader", "egress", "sandbox")
     (tmp_path / "input").mkdir()
     (tmp_path / "output").mkdir()
     (tmp_path / "input" / "requests.jsonl").write_text(
         json.dumps({"key": str(uuid.uuid4()), "question": QUESTION}) + "\n", encoding="utf-8")
     args = ["--requests", str(tmp_path / "input" / "requests.jsonl"),
             "--out", str(tmp_path / "output" / "responses.jsonl"), "--model", MODEL]
-    monkeypatch.setenv("ASOFBENCH_IMAGE_IDS", f"reader={IMAGES['reader']},"
-                                              f"egress={IMAGES['egress']}")
+    monkeypatch.setenv("ASOFBENCH_IMAGE_IDS", ",".join(f"{name}={IMAGES[name]}"
+                                                       for name in ("reader", "egress", "sandbox")))
     assert agent.main(args) == plumbing.EXIT_STOPPED
-    assert "name=ID entries for reader, egress, sandbox (systems/README.md)" in (
+    assert "name=ID entries for grep-at-d, reader, egress, sandbox (systems/README.md)" in (
         capsys.readouterr().err)
     with pytest.raises(SystemExit) as caught:
         agent.main(["--self-test", "--model", MODEL])
@@ -709,6 +712,9 @@ def test_a_sandbox_that_cannot_be_reached_stops_the_run_with_exit_status_2(envir
 @needs_sdk
 def test_the_self_test_passes_on_this_sdk_and_fails_on_a_loop_that_drifts(environment,
                                                                          monkeypatch, capsys):
+    # The image's self-test is a module of its own, which the agent's --self-test runs.
+    selftest = grep_modules.selftest()
+    assert selftest.check_loop() == importlib.import_module("anthropic").__version__
     assert agent.self_test() == 0
     assert capsys.readouterr().out.startswith("grep at D self-test: ")
     registered = agent.settings

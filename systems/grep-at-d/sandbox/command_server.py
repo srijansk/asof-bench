@@ -9,11 +9,13 @@ It runs in the sandbox container, which holds its arm's tree as of the end of th
 beside it (read-only at /repo), its own software and nothing else, on a network that only the
 agent's container shares, which leads nowhere else. Its one request is ``POST /run`` with a JSON
 body ``{"command": "<a shell command>"}``, answered with 200 and ``{"exit_code", "stdout",
-"stderr", "truncated", "timed_out"}``. Every other request is refused with a JSON body
-``{"error": ...}`` and runs nothing: another path with 404, another method with 405 (501 for one
-that HTTP does not define), a body without a Content-Length with 411, one over MAX_BODY bytes with
-413, and a body that is not a JSON object whose one field, ``command``, is a string of at most
-MAX_COMMAND_BYTES bytes in UTF-8 with no NUL character with 400. A command that cannot be started
+"stderr", "truncated", "timed_out"}``. Every other request is refused with a status line and a
+JSON body ``{"error": ...}``, and runs nothing: another path with 404, another method with 405
+(501 for one that HTTP does not define), a body without a Content-Length with 411, one over
+MAX_BODY bytes with 413, and a body that is not a JSON object whose one field, ``command``, is a
+string of at most MAX_COMMAND_BYTES bytes in UTF-8 with no NUL character with 400; the refusals
+that http.server makes itself (a request line that is not one, an HTTP/0.9 request, a request line
+over its limit) answer in the same form (``Handler.send_error``). A command that cannot be started
 (the tree is gone, or no process can be made) is a failure of the sandbox, answered with 500.
 
 Each command:
@@ -30,9 +32,10 @@ Each command:
   whether either output was cut;
 - starts with the scratch directory empty, whatever an earlier command left in it.
 
-Commands run one at a time: a request that arrives while one runs waits for it. So no command sees
-another's processes or scratch files, and the requests of a date, whose agents share one sandbox,
-never see one another's work.
+Commands run one at a time, in the order their requests arrive (``Turnstile``): a request that
+arrives while one runs waits for it and for those that came before it. So no command sees
+another's processes or scratch files, the requests of a date, whose agents share one sandbox,
+never see one another's work, and a command waits for at most the commands that came before it.
 
 ``--self-test``, which the image's build runs with no network, checks that the tools the sandbox
 is built with are installed and that a command runs. It uses only the standard library.
@@ -53,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -210,9 +214,40 @@ def command_of(body: bytes) -> str | None:
     return command if size <= MAX_COMMAND_BYTES else None
 
 
+class Turnstile:
+    """Lets its holders through one at a time, in the order they came: each takes a ticket on its
+    way in, and when a holder leaves, the next ticket goes, whatever order the threads that wait
+    are woken in (a lock alone does not promise that order)."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._issued = 0
+        self._serving = 0
+
+    def tickets(self) -> int:
+        """How many tickets have been taken."""
+        with self._condition:
+            return self._issued
+
+    @contextlib.contextmanager
+    def turn(self) -> Iterator[None]:
+        with self._condition:
+            ticket = self._issued
+            self._issued += 1
+            while ticket != self._serving:
+                self._condition.wait()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._serving += 1
+                self._condition.notify_all()
+
+
 class CommandServer(ThreadingHTTPServer):
     """The HTTP server of the sandbox, over the tree at ``root``, with ``scratch`` the directory
-    that each command may write in; it runs one command at a time (``lock``)."""
+    that each command may write in; it runs one command at a time, in the order the requests
+    arrive (``turnstile``)."""
 
     daemon_threads = True
     request_queue_size = 64
@@ -222,7 +257,7 @@ class CommandServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
         self.root, self.scratch = Path(root), Path(scratch)
         self.timeout_s, self.limit = timeout_s, limit
-        self.lock = threading.Lock()
+        self.turnstile = Turnstile()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -234,6 +269,10 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 30
 
     def reply(self, status: int, body: dict, **headers: str) -> None:
+        # Every answer has a status line and headers: http.server writes none for an HTTP/0.9
+        # request or one whose version it could not read.
+        if self.request_version in ("HTTP/0.9", ""):
+            self.request_version = "HTTP/1.0"
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -241,7 +280,17 @@ class Handler(BaseHTTPRequestHandler):
         for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def send_error(self, code: int, message: str | None = None,
+                   explain: str | None = None) -> None:
+        """http.server's own refusals, answered in JSON as every other refusal is."""
+        if message is None:
+            message = self.responses.get(code, ("refused",))[0]
+        self.log_error("code %d, message %s", code, message)
+        self.close_connection = True
+        self.reply(code, {"error": message}, Connection="close")
 
     def do_POST(self) -> None:  # noqa: N802 - the name http.server calls
         if self.path != "/run":
@@ -262,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, {"error": BAD_BODY})
             return
         try:
-            with self.server.lock:
+            with self.server.turnstile.turn():
                 result = run(command, root=self.server.root, scratch=self.server.scratch,
                              timeout_s=self.server.timeout_s, limit=self.server.limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:

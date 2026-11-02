@@ -1,17 +1,16 @@
-"""How the reader is put together: its Dockerfile's list of the reader's, grep at D's agent's and
-the shared package's files against the ones that its two entry points import (the runner, with
-its self-test, and grep at D's agent), and the rest of the image as Graphiti's is built; the
+"""How the reader is put together: its Dockerfile's list of the reader's and the shared package's
+files against the ones that its runner and its self-test import, and nothing of grep at D's (whose
+image is built FROM the reader's), and the rest of the image as Graphiti's is built; the
 self-test's check of the installation against a lock; its compose file (the egress service as
 Graphiti's, the reader on the internal network only, its two mounts and the key as a Docker
 secret); its network check (the shared flags, no services, its mounts, after the proxy accepts
 connections); its lock; the config.json of each single-call entrant (closed book, long context
 and the oracle) against the code it records; that no module outside the tests is one that pytest
-collects; and the CI step that runs the answering tests with the SDK that the lock pins. Standard
-library only, with packaging, which pytest installs."""
+collects; and the CI step that runs the answering tests, grep at D's agent loop among them, with
+the SDK that the lock pins. Standard library only, with packaging, which pytest installs."""
 
 from __future__ import annotations
 
-import ast
 import fnmatch
 import importlib.metadata
 import json
@@ -28,6 +27,7 @@ from image_files import (
     copied_python_files,
     copied_shared_files,
     items,
+    package_files_needed,
     shared_file_differences,
     shared_files_needed,
 )
@@ -36,7 +36,6 @@ from reader import selftest
 
 SYSTEMS = Path(__file__).resolve().parents[1]
 READER = SYSTEMS / "reader"
-GREP_AT_D = SYSTEMS / "grep-at-d"
 PACKAGE = SYSTEMS / "common" / "asofbench_systems"
 ENTRANTS = ("closed-book", "long-context", "oracle")
 PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)[ \t]*(;[^\\\n]*)?", re.M)
@@ -52,40 +51,20 @@ def lock_pins(marked: bool = False) -> dict[str, str]:
 def reader_files_needed(entry: Path) -> set[str]:
     """The reader's own modules that the module at ``entry`` imports, and those that those import
     in turn, with ``entry``'s own file: the files of systems/reader that the image needs."""
-    needed, pending = {entry.name}, [entry]
-    while pending:
-        for node in ast.walk(ast.parse(pending.pop().read_text(encoding="utf-8"))):
-            names = []
-            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "reader":
-                names = [alias.name for alias in node.names]
-            elif (isinstance(node, ast.ImportFrom) and node.level == 0
-                  and (node.module or "").startswith("reader.")):
-                names = [node.module.split(".")[1]]
-            elif isinstance(node, ast.Import):
-                names = [alias.name.split(".")[1] for alias in node.names
-                         if alias.name.startswith("reader.")]
-            for name in names:
-                if f"{name}.py" not in needed:
-                    needed.add(f"{name}.py")
-                    pending.append(READER / f"{name}.py")
-    return needed
+    return package_files_needed(entry, "reader", READER)
 
 
-def test_the_image_copies_the_files_that_its_entry_points_import_and_no_others():
+def test_the_image_copies_the_files_that_the_runner_and_its_self_test_import_and_no_others():
     own = reader_files_needed(READER / "answer_requests.py")
-    # The runner imports its self-test (for --self-test), which imports the runner back; grep at
-    # D's agent imports the runner, which answers its requests.
+    # The runner imports its self-test (for --self-test), which imports the runner back.
     assert own == {"answer_requests.py", "selftest.py"}
-    assert reader_files_needed(GREP_AT_D / "agent.py") == {"agent.py", *own}
     dockerfile = (READER / "Dockerfile").read_text(encoding="utf-8")
     assert copied_python_files(dockerfile, "reader") == own
-    assert copied_python_files(dockerfile, "grep-at-d") == {"agent.py"}
-    assert "COPY grep-at-d/agent.py /app/grep_at_d/agent.py\n" in dockerfile
-    # Nothing of the sandbox's: its server runs in an image of its own.
-    assert "sandbox" not in "".join(line for line in dockerfile.splitlines()
-                                    if line.startswith("COPY"))
-    needed = shared_files_needed([*(READER / name for name in sorted(own)),
-                                  GREP_AT_D / "agent.py"], PACKAGE)
+    # Nothing of grep at D's: its agent is in an image of its own, built FROM this one.
+    assert copied_python_files(dockerfile, "grep-at-d") == set()
+    assert "grep" not in "".join(line for line in dockerfile.splitlines()
+                                 if not line.lstrip().startswith("#"))
+    needed = shared_files_needed([READER / name for name in sorted(own)], PACKAGE)
     # The files that the runner cannot do without, so that an empty result is no pass.
     assert {"__init__.py", "answer.py", "llm.py", "run.py", "usage.py"} <= needed
     assert "stream.py" not in needed
@@ -147,10 +126,6 @@ def test_the_image_is_built_as_graphiti_s_is():
     assert dockerfile.index("\nUSER 10001:10001\n") < dockerfile.index(
         "\nRUN --network=none answer_requests --self-test\n")
     assert 'exec python -m reader.answer_requests "$@"' in dockerfile
-    # Grep at D's agent, as the command that its runs use, with a self-test of its own.
-    assert 'exec python -m grep_at_d.agent "$@"' in dockerfile
-    assert dockerfile.index("\nRUN --network=none answer_requests --self-test\n") < (
-        dockerfile.index("\nRUN --network=none grep_at_d --self-test\n"))
     # The paths the self-test finds the lock and the network check at, in the image's layout.
     assert selftest.REQUIREMENTS == READER.parent / "requirements.txt"
     assert reader.NETCHECK_SCRIPT == SYSTEMS / "env" / "netcheck.py"

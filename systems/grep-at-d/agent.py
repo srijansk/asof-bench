@@ -1,16 +1,19 @@
 """Grep at D's agent (PREREGISTRATION.md sections 8 and 11): the version-control baseline, which
 answers a question by reading its arm's tree as of the end of the question's date and the log
 beside it (the files at D and the log, without diffs or earlier versions) with read-only shell
-commands, which run in a sandbox that has no route out. It runs in the reader image, through the
-reader's runner (reader/answer_requests.py), as the answering function that the runner calls for
-each request, so that the runner's concurrency, its resume by key, its usage log and its stops
-hold for it as for the single-call entrants:
+commands, which run in a sandbox that has no route out. It runs in an image of its own,
+asofbench/grep-at-d, built FROM the reader image with this module and its self-test added
+(grep-at-d/Dockerfile), through the reader's runner (reader/answer_requests.py), as the answering
+function that the runner calls for each request, so that the runner's concurrency, its resume by
+key, its usage log and its stops hold for it as for the single-call entrants:
 
     grep_at_d --requests /input/requests.jsonl --out /output/responses.jsonl \\
-        --model claude-haiku-5-5|claude-sonnet-5-5 [--resume]
+        --model claude-haiku-5-5|claude-sonnet-5-5 [--resume] [--api-errors-before N]
 
 One run answers the requests of one arm and date, whose tree run_dates.py builds on the host and
-the sandbox holds, read-only, at /repo (systems/README.md).
+the sandbox holds, read-only, at /repo (systems/README.md); run_dates.py gives each run the count
+of ``api_error`` responses in a row that the dates before it ended with (``--api-errors-before``),
+so that the runner's stop after five in a row spans the dates.
 
 **The loop** (``answer_with_commands``). The first turn is the question, ``Question: {question}``,
 as a single-call entrant's is when it has no context. Every turn is an answering call with the
@@ -55,11 +58,11 @@ anything but a command's result is a failure of the environment (``SandboxUnavai
 request has no response, so that a resumed run answers it again; it never becomes a null answer.
 
 The network check waits for the sandbox as for the proxy and checks it as the environment's one
-service (``netcheck_preflight``), and each run records the IDs of three images, the reader's, the
-proxy's and the sandbox's (``IMAGE_NAMES``). ``--self-test``, which the image's build runs with no
-network, makes one answer of two turns through the installed SDK to an httpx MockTransport, with a
-stand-in for the sandbox, and checks that each turn sends the registered settings with the tool,
-that the second sends the first reply back as it came, and that each marks its last block alone.
+service (``netcheck_preflight``), and each run records the IDs of four images (``IMAGE_NAMES``):
+grep at D's own, the reader's that it is built from, the proxy's and the sandbox's.
+``--self-test``, which the image's build runs with no network, is the image's self-test
+(``grep_at_d.selftest``): one answer of two turns through the installed SDK to an httpx
+MockTransport, with a stand-in for the sandbox.
 
 ``anthropic`` and ``httpx`` are imported only inside the functions that need them, so the module
 imports where neither is installed.
@@ -72,11 +75,10 @@ import copy
 import functools
 import json
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-from asofbench_systems import answer, llm
+from asofbench_systems import answer
 from asofbench_systems.run import INFRASTRUCTURE, infrastructure_error
 from reader import answer_requests
 
@@ -128,9 +130,9 @@ SANDBOX_TIMEOUT_S = 300.0
 RESULT_FIELDS = ("exit_code", "stdout", "stderr", "truncated", "timed_out")
 MAX_ANSWER_BYTES = 1 << 22
 CHUNK = 1 << 16
-# The images a run records, as the launcher gives them in ASOFBENCH_IMAGE_IDS.
-IMAGE_NAMES = ("reader", "egress", "sandbox")
-QUESTION = "Is this the self-test?"
+# The images a run records, as the launcher gives them in ASOFBENCH_IMAGE_IDS: grep at D's own,
+# the reader's that it is built from, the proxy's and the sandbox's.
+IMAGE_NAMES = ("grep-at-d", "reader", "egress", "sandbox")
 
 
 class SandboxUnavailable(ConnectionError):
@@ -328,125 +330,11 @@ def netcheck_preflight(out_dir: Path) -> int:
     return answer_requests.netcheck_preflight(out_dir, services=(SANDBOX,))
 
 
-def unmarked(value):
-    """``value`` without its prompt cache markers, at any depth."""
-    if isinstance(value, dict):
-        return {key: unmarked(item) for key, item in value.items() if key != "cache_control"}
-    if isinstance(value, list):
-        return [unmarked(item) for item in value]
-    return value
-
-
-def marker_count(value) -> int:
-    if isinstance(value, dict):
-        return ("cache_control" in value) + sum(marker_count(item) for item in value.values())
-    if isinstance(value, list):
-        return sum(marker_count(item) for item in value)
-    return 0
-
-
-def check_loop() -> str:
-    """Checks, with no network, that an answer of two turns through the installed SDK sends the
-    registered settings with the tool on each turn, sends the first reply back as it came and
-    marks each request's last block alone for the prompt cache; returns the SDK's version.
-    RuntimeError naming each difference otherwise."""
-    import anthropic
-    import httpx
-
-    model = answer.MODELS[0]
-    replies = [
-        {"id": "msg_self_test_1", "type": "message", "role": "assistant", "model": model,
-         "stop_reason": "tool_use", "stop_sequence": None,
-         "content": [{"type": "thinking", "thinking": "", "signature": "c2VsZi10ZXN0LTE="},
-                     {"type": "tool_use", "id": "toolu_self_test", "name": TOOL["name"],
-                      "input": {"command": "head -n 3 git-log.txt"}}],
-         "usage": {"input_tokens": 1, "output_tokens": 1}},
-        {"id": "msg_self_test_2", "type": "message", "role": "assistant", "model": model,
-         "stop_reason": "end_turn", "stop_sequence": None,
-         "content": [{"type": "thinking", "thinking": "", "signature": "c2VsZi10ZXN0LTI="},
-                     {"type": "text", "text": '{"answer": "self-test"}'}],
-         "usage": {"input_tokens": 1, "output_tokens": 1}},
-    ]
-    printed = {"exit_code": 0, "stdout": "self-test\n", "stderr": "", "truncated": False,
-               "timed_out": False}
-    sent, commands = [], []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200, json=replies[min(len(sent), len(replies)) - 1])
-
-    class StandIn:
-        async def run(self, command: str) -> dict:
-            commands.append(command)
-            return dict(printed)
-
-    with tempfile.TemporaryDirectory() as scratch:
-        key_file = Path(scratch) / "key"
-        key_file.write_text("self-test-key\n", encoding="ascii")
-        client = llm.make_async_client(str(key_file), max_retries=0,
-                                       transport=httpx.MockTransport(respond))
-
-        async def go() -> dict:
-            try:
-                return await answer_with_commands(client, model, QUESTION, None,
-                                                  sandbox=StandIn())
-            finally:
-                await client.close()
-
-        try:
-            result = asyncio.run(go())
-        except Exception as error:  # noqa: BLE001 - the self-test reports it as a failure
-            raise RuntimeError(f"the answer raised {type(error).__name__}: {error}") from None
-    registered = {**answer.answering_settings(model, system=SYSTEM_PROMPT), "tools": [TOOL],
-                  "tool_choice": TOOL_CHOICE}
-    question = {"role": "user",
-                "content": [{"type": "text", "text": answer.user_message(QUESTION, None)}]}
-    transcripts = [[question],
-                   [question, {"role": "assistant", "content": replies[0]["content"]},
-                    {"role": "user", "content": [{"type": "tool_result",
-                                                  "tool_use_id": "toolu_self_test",
-                                                  "content": render(printed)}]}]]
-    problems = [] if len(sent) == 2 else [f"the answer made {len(sent)} calls, not 2"]
-    for n, (request, transcript) in enumerate(zip(sent, transcripts, strict=False), 1):
-        body = json.loads(request.content)
-        if str(request.url) != f"{llm.BASE_URL}/v1/messages":
-            problems.append(f"turn {n} goes to {request.url}")
-        if "anthropic-beta" in request.headers:
-            problems.append(f"turn {n} sends an anthropic-beta header")
-        differing = sorted(name for name in (set(body) | set(registered)) - {"messages"}
-                           if body.get(name) != registered.get(name))
-        if differing:
-            problems.append(f"turn {n} differs from the registered settings and tool in "
-                            f"{', '.join(differing)}")
-        messages = body.get("messages") or [{"content": [{}]}]
-        if (marker_count(body) != 1
-                or messages[-1]["content"][-1].get("cache_control") != CACHE):
-            problems.append(f"turn {n} does not mark its last block, and it alone, for the "
-                            "prompt cache")
-        if unmarked(messages) != transcript:
-            problems.append(f"turn {n}'s messages are not the question, then each reply as it "
-                            "came and its results")
-    if commands != ["head -n 3 git-log.txt"]:
-        problems.append(f"the sandbox was given {commands!r}")
-    if (result["answer"], result["error"], result["tool_calls"], result["thinking_blocks"]) != (
-            "self-test", None, 1, 2):
-        problems.append(f"the answer was read as {result!r}")
-    if problems:
-        raise RuntimeError("; ".join(problems))
-    return anthropic.__version__
-
-
 def self_test() -> int:
-    """``check_loop``: prints what it found and returns 0, or the differences and 1."""
-    try:
-        sdk = check_loop()
-    except RuntimeError as error:
-        print(f"grep at D self-test: FAIL: {error}", file=sys.stderr)
-        return 1
-    print(f"grep at D self-test: anthropic {sdk}; each turn of an answer sends the registered "
-          "settings with the run tool and tool_choice auto, the second sends the first reply back "
-          "as it came, and each marks its last block alone for the prompt cache")
-    return 0
+    """The image's self-test (``grep_at_d.selftest``), imported only when it runs."""
+    from grep_at_d import selftest
+
+    return selftest.self_test()
 
 
 def main(argv: list[str] | None = None) -> int:

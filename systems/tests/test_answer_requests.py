@@ -93,8 +93,9 @@ def write_lines(path, lines) -> None:
 
 
 def go(layout, asker, *, resume: bool = False, preflight=None, clients=None, model: str = MODEL,
-       concurrency: int = reader.CONCURRENCY, progress=None) -> int:
-    """One invocation on ``layout``, with ``asker`` for the answering call."""
+       concurrency: int = reader.CONCURRENCY, progress=None, **counted) -> int:
+    """One invocation on ``layout``, with ``asker`` for the answering call (and, in ``counted``,
+    the run's ``api_errors_before``)."""
     opened = [] if clients is None else clients
 
     def open_client(log, key_file):
@@ -105,7 +106,7 @@ def go(layout, asker, *, resume: bool = False, preflight=None, clients=None, mod
         layout / "input" / "requests.jsonl", layout / "output" / "responses.jsonl", model,
         resume=resume, images=IMAGES, open_client=open_client, ask=asker, preflight=preflight,
         key_file=str(layout / "key"), concurrency=concurrency,
-        progress=progress or (lambda line: None)))
+        progress=progress or (lambda line: None), **counted))
 
 
 def responses_of(layout) -> list[dict]:
@@ -263,6 +264,48 @@ def test_a_resume_counts_on_from_the_api_errors_that_the_responses_end_with(layo
     assert reader.trailing_api_errors(responses_of(layout)) == 3
 
 
+def test_a_run_counts_on_from_the_api_errors_that_the_runs_before_it_ended_with(layout):
+    # Grep at D's dates are runs of their own, one after another: the count of api_error
+    # responses in a row goes on from the dates before (api_errors_before, which run_dates.py
+    # gives), so that a cause that every request shares stops the run wherever it falls.
+    requests = write_requests(layout, 4)
+    asker = Asker(errors=api_errors(0, 1, 2, 3))
+    assert go(layout, asker, concurrency=1, api_errors_before=3) == plumbing.EXIT_FAILURES
+    # The third run's fifth in a row is this one's second response.
+    assert [r["key"] for r in responses_of(layout)] == [r["key"] for r in requests[:2]]
+    (invocation,) = record_of(layout)["invocations"]
+    assert (invocation["exit"], invocation["stop"]) == (
+        3, {"error": "5 consecutive api_error responses", "api_errors_before": 3})
+
+
+def test_an_answer_resets_the_count_carried_from_the_runs_before(layout):
+    write_requests(layout, 6)
+    asker = Asker(errors=api_errors(1, 2, 3, 4))
+    assert go(layout, asker, concurrency=1, api_errors_before=4) == plumbing.EXIT_FAILED
+    assert len(responses_of(layout)) == 6
+    # And with nothing carried, the count is the reader's own.
+    (invocation,) = record_of(layout)["invocations"]
+    assert invocation["stop"] is None
+
+
+def test_a_resumed_run_adds_the_carried_count_only_to_responses_that_are_all_api_errors(layout):
+    write_requests(layout, 6)
+    # Two api_error responses and a stop; resumed with two carried from the runs before, the
+    # third api_error is the fifth in a row.
+    first = Asker(errors=api_errors(0, 1), raises={"question 2": Unreachable("down")})
+    assert go(layout, first, concurrency=1, api_errors_before=2) == plumbing.EXIT_STOPPED
+    second = Asker(errors=api_errors(2, 3, 4, 5))
+    assert go(layout, second, resume=True, concurrency=1,
+              api_errors_before=2) == plumbing.EXIT_FAILURES
+    assert [c["question"] for c in second.calls] == ["question 2"]
+    assert reader.trailing_api_errors(responses_of(layout), 2) == 5
+    # An answer among the responses: the carried count no longer joins them.
+    assert reader.trailing_api_errors([{"error": None}, {"error": "api_error"}], 4) == 1
+    assert reader.trailing_api_errors([], 4) == 4
+    with pytest.raises(plumbing.Refused, match="api_errors_before"):
+        go(layout, Asker(), resume=True, api_errors_before=-1)
+
+
 def test_nothing_is_answered_unless_the_network_check_passes(layout):
     write_requests(layout, 3)
     asker, clients, checked = Asker(), [], []
@@ -397,7 +440,9 @@ def test_the_command_line_refuses_what_it_cannot_run(layout, monkeypatch, capsys
     args = ["--requests", str(layout / "input" / "requests.jsonl"),
             "--out", str(layout / "output" / "responses.jsonl")]
     for argv in ([], args, [*args, "--model", "claude-opus-5-5"],
-                 ["--self-test", "--model", MODEL]):
+                 ["--self-test", "--model", MODEL],
+                 [*args, "--model", MODEL, "--api-errors-before", "-1"],
+                 [*args, "--model", MODEL, "--api-errors-before", "two"]):
         with pytest.raises(SystemExit) as caught:
             reader.main(argv)
         assert caught.value.code == 2, argv

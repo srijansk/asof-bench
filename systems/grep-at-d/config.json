@@ -1,6 +1,6 @@
 {
   "system": "grep-at-d",
-  "description": "Grep at D: the version-control baseline (PREREGISTRATION.md section 11), an agent that answers each item's question by reading its arm's tree as of the end of the item's date and the log beside it, the files at D and git-log.txt, without diffs or earlier versions, with read-only shell commands that run in a sandbox with no route out. systems/harness.py writes its requests, one file for each arm and date, and its answer rows; grep-at-d/run_dates.py builds each date's tree with asofbench materialize, runs that date's requests in grep at D's environment (grep-at-d/compose.yaml) and deletes the tree; the agent (grep-at-d/agent.py) answers in the reader image through the reader's runner, and its commands run in the sandbox (grep-at-d/sandbox); systems/README.md describes them.",
+  "description": "Grep at D: the version-control baseline (PREREGISTRATION.md section 11), an agent that answers each item's question by reading its arm's tree as of the end of the item's date and the log beside it, the files at D and git-log.txt, without diffs or earlier versions, with read-only shell commands that run in a sandbox with no route out. systems/harness.py writes its requests, one file for each arm and date, and its answer rows; grep-at-d/run_dates.py builds each date's tree with asofbench materialize, runs that date's requests in grep at D's environment (grep-at-d/compose.yaml) and deletes the tree; the agent (grep-at-d/agent.py) answers in grep at D's own image, built FROM the reader image (grep-at-d/Dockerfile), through the reader's runner, and its commands run in the sandbox (grep-at-d/sandbox); systems/README.md describes them.",
   "inputs": "the question text, and in the sandbox its arm's tree as of the end of the item's date: the proposal files as they stood, rebuilt from that arm's episodes by asofbench materialize and named <repo>/<series>-<number>, and git-log.txt beside them, the log of the commits up to that date; nothing else from the repositories, so no header that the arm withholds, no index such as PEP 0 and nothing recorded after the date",
   "entries": "every item in every arm that its arms field lists (section 12), each three times (runs 1, 2 and 3); in a pilot run, the items of a list such as data/v0.1/pilot.json (harness.py requests --items)",
   "requests": {
@@ -96,7 +96,7 @@
       }
     },
     "tools": "the run tool (prompts.tool), which the agent runs in the sandbox, and no other",
-    "tool_choice": "auto, so that the model thinks before it calls the tool (a forced tool_choice turns thinking off on these models)",
+    "tool_choice": "auto on every turn: the model chooses on each turn whether to call the tool; the registered settings use adaptive thinking, and the tool choice is left at auto with them",
     "not_sent": "no temperature, top_p or top_k, so the temperature is the default; no prefill (each turn's messages end with a user turn); no other tool, no server tool, no strict mode and no beta header",
     "scorer_settings": "effort medium, adaptive thinking, default temperature",
     "prompt_caching": {
@@ -144,7 +144,7 @@
   "shaping": "the harness shapes each answer by the item's answer_type and does nothing else to it: for status, a string is kept, an integer becomes its decimal string, and anything else is kept as it came; for set, a list is kept, a string that parses as a JSON list is replaced by that list, and anything else is kept as it came; for count, an integer is kept, a string of ASCII digits with an optional leading minus sign is replaced by its integer, and anything else is kept as it came. A boolean is no integer. The scorer normalises the rest",
   "rows": "harness.py rows writes one row per request, in keys.jsonl's order, with exactly the nine fields of section 12, gathering the responses of every date's output/<file>/ after checking dates.json and each date's requests file against plan.json and each response against its date's keys; a key with no response, which a date that has not run or stopped leaves, gets a null answer and null costs, and rows exits 1",
   "run": {
-    "runner": "the reader's runner, reader/answer_requests.py, with grep at D's answering function, images and network check (grep_at_d, agent.main): its concurrency, its resume by key, its usage log, its lock, run.json and its stops hold as for the single-call entrants",
+    "runner": "the reader's runner, reader/answer_requests.py, which grep at D's image holds from the reader image, with grep at D's answering function, images, network check and self-test (grep_at_d, agent.main): its concurrency, its resume by key, its usage log, its lock, run.json and its stops hold as for the single-call entrants",
     "concurrency": 8,
     "max_retries": 8,
     "timeout_s": 600.0,
@@ -155,7 +155,8 @@
     "resume": "answer_requests --resume answers every request that has no response, after checking that the requests file, the responses file and the model are those that the run began with",
     "lock": "every invocation holds the output directory's lock, run.lock, created with O_EXCL and touched every 30 s, and removes it at its end; a second invocation on the directory stops at once with exit status 2",
     "exit_status": "0 when every request has a response with an answer; 1 when every request has a response and some of them have an error code; 2 when it is refused before it starts, the network check fails or an infrastructure error stops it; 3 when 5 api_error responses in a row stop it; 4 when it crashes, which run.json records with the exception's class",
-    "dates": "grep-at-d/run_dates.py, on the host, runs one environment for each arm and date in dates.json's order: it builds the date's tree with asofbench materialize --arm --data from the arm's registered stream into a fresh directory outside the repository, runs the agent with that date's input/<file>/, output/<file>/ and tree, saves the proxy's log beside the responses, takes the environment down and deletes the tree whatever the run did; a date that is done is skipped, one that stopped with exit status 2 or 4 or was killed is resumed, and one that stopped with exit status 3 stops it, since its run is discarded and never resumed; it checks dates.json, each requests file and the build's MANIFEST.json against plan.json first"
+    "dates": "grep-at-d/run_dates.py, on the host, runs one environment for each arm and date in dates.json's order: it builds the date's tree with asofbench materialize --arm --data from the arm's registered stream into a fresh directory outside the repository, named tree- and random letters, which say nothing of the arm or the date, with every directory 0755 and every file 0644 so that uid 10001 reads it; it runs the agent with that date's input/<file>/, output/<file>/ and tree, saves the proxy's log beside the responses, takes the environment down (whose failure stops it) and deletes the tree whatever the run did; a date that is done is skipped, one that stopped with exit status 2 or 4 or was killed is resumed, and one that stopped with exit status 3 stops it, since its run is discarded and never resumed. It checks first that grep at D's image is built on the reader image whose ID the run records (its layers begin with the reader's), and dates.json, each requests file and the build's MANIFEST.json against plan.json; it holds the run directory's lock (run.lock) to its end, and a SIGTERM takes the date under way down, deletes its tree and releases the lock before it stops, with exit status 2, for a later invocation to resume",
+    "api_errors_across_dates": "the stop after 5 api_error responses in a row spans the dates: each date's run is given --api-errors-before N, the api_error responses in a row that the dates before it ended with, in the order they were answered (dates.json's), counted on from the previous date's count when every one of a date's responses is an api_error and from the api_error responses that it ends with otherwise, and on a resume from the dates already done; the runner counts on from N, so that the fifth in a row stops the run with exit status 3 wherever it falls, and run.json's stop then records N as api_errors_before; run_dates.py stops with exit status 3 and the advice to discard the run and run it again in a fresh run directory"
   },
   "sandbox": {
     "image": "asofbench/sandbox, built from grep-at-d/sandbox/Dockerfile with that directory as the context; its build ends with the command server's self-test, run with no network",
@@ -172,9 +173,10 @@
     "hardening": "no capability (cap_drop ALL), no-new-privileges, a private IPC namespace with no /dev/shm (ipc none), an init process that reaps what a command leaves (init: true), no secret, no environment from the host and no published port",
     "network": "sandbox_net alone, an internal network with no address of the host on it, which only the agent's container shares: no route out, no proxy",
     "port": 7000,
-    "api": "POST /run with a JSON body {\"command\": str}, answered with {\"exit_code\", \"stdout\", \"stderr\", \"truncated\", \"timed_out\"}; every other request is refused and runs nothing (grep-at-d/sandbox/command_server.py)",
-    "commands": "each runs as bash -c in /repo, in a session and process group of its own, with stdin from /dev/null and an environment of PATH, LANG and LC_ALL (C.UTF-8), HOME and TMPDIR alone; it ends when bash exits or at 20 s, and then its whole process group is killed, background jobs included; stdout and stderr are each kept up to 20,000 characters, read as UTF-8 with each byte that is not replaced, and end with a final line [cut: N characters omitted] when cut",
-    "one_at_a_time": "commands run one at a time, so that the requests of a date, whose agents share the sandbox, never see one another's processes or scratch files; a command waits for those before it, and its answer's wall_s includes the wait",
+    "api": "POST /run with a JSON body {\"command\": str}, answered with {\"exit_code\", \"stdout\", \"stderr\", \"truncated\", \"timed_out\"}; every other request is refused, with a status line and a JSON body {\"error\": ...}, and runs nothing, http.server's own refusals included (grep-at-d/sandbox/command_server.py)",
+    "commands": "each runs as bash -c in /repo, in a session and process group of its own, with stdin from /dev/null and an environment of PATH, LANG and LC_ALL (C.UTF-8), HOME and TMPDIR alone; it ends when bash exits or at 20 s, and then its whole process group is killed, background jobs included; stdout and stderr are each kept up to 20,000 characters, read as UTF-8 with each byte that is not UTF-8 replaced by U+FFFD, and an output that is longer is cut there and ends with a final line [cut: N characters omitted]",
+    "tools": "the agent's commands may use what the sandbox image holds: bash, coreutils, grep, findutils, sed and gawk, and python3, which the command server needs and the commands may run too, with no route out from either",
+    "one_at_a_time": "commands run one at a time, in the order their requests arrive (a ticket for each, served in turn), so that the requests of a date, whose agents share the sandbox, never see one another's processes or scratch files; a command waits for those that came before it, and its answer's wall_s includes the wait",
     "client_timeout_s": 300.0,
     "stated_limits": "a process that a command moves into a session of its own (setsid) leaves the process group that is killed, and lives until the date's environment is taken down; the commands run as the server's user, so one could stop the server, which stops the run with exit status 2"
   },
@@ -205,51 +207,49 @@
         "network": "sandbox_net alone, which only the agent's container shares; it reaches neither the proxy nor anything beyond the agent's container"
       }
     ],
-    "container": "the agent's container, in the reader image, is on inner, with the egress proxy, and on sandbox_net, with the sandbox, and sees its runner, the agent, the shared package, the date's requests (input/<file>/, read-only at /input), its output directory (/output) and the API key as a Docker secret; the sandbox's container sees the date's tree, read-only at /repo, and nothing else of the host",
-    "unreachable": "data/v0.1, every file of this repository other than the reader's runner, the agent, the shared package, the network check and the command server, the harness's keys.jsonl, plan.json and dates.json, the streams, every other date's tree, the corpus clones, and the corpora's live sources (github.com/python/peps, github.com/ethereum/EIPs, github.com/ethereum/ERCs, peps.python.org, eips.ethereum.org and ercs.ethereum.org), their mirrors or a clone of them",
+    "container": "the agent's container, in grep at D's image (the reader image with the agent and its self-test added), is on inner, with the egress proxy, and on sandbox_net, with the sandbox, and sees the reader's runner, the shared package, the network check, the agent and its self-test, the date's requests (input/<file>/, read-only at /input), its output directory (/output) and the API key as a Docker secret; the sandbox's container sees the date's tree, read-only at /repo, and nothing else of the host",
+    "unreachable": "data/v0.1, every file of this repository other than the reader's runner, the agent and its self-test, the shared package, the network check and the command server, the harness's keys.jsonl, plan.json and dates.json, the streams, every other date's tree, the corpus clones, and the corpora's live sources (github.com/python/peps, github.com/ethereum/EIPs, github.com/ethereum/ERCs, peps.python.org, eips.ethereum.org and ercs.ethereum.org), their mirrors or a clone of them",
     "provider_side_tools": "none: every turn carries the one client-side tool, run, which the agent runs in the sandbox, and no server tool (web search, web fetch, code execution, file search or any other)",
     "checked_by": "env/netcheck.py, run by grep_at_d before anything is answered, with the flags that every system gives it (asofbench_systems.run.NETCHECK_ARGS), the sandbox (sandbox:7000) as its one service, which must resolve and accept a connection, and the mounts /input, /output and /run/secrets; it aborts the run on any failure, and its report is netcheck.json in the date's output directory; the sandbox's own isolation is checked by hand inside its container (systems/README.md)"
   },
   "installed": {
-    "reader": {
-      "python": "3.12.16",
-      "base_image": "python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159",
-      "lock": "reader/requirements.txt, compiled from reader/requirements.in with hashes by uv 0.7.2; the image installs it hash-checked, from wheels only, and its build's self-test checks the installed packages against it",
-      "python_packages": {
-        "annotated-types": "0.8.0",
-        "anthropic": "0.78.0",
-        "anyio": "4.15.1",
-        "certifi": "2026.10.23",
-        "distro": "1.9.0",
-        "docstring-parser": "0.18.0",
-        "h11": "0.16.0",
-        "httpcore": "1.0.9",
-        "httpx": "0.28.1",
-        "idna": "3.20",
-        "iniconfig": "2.3.1",
-        "jiter": "0.18.0",
-        "packaging": "26.3",
-        "pluggy": "1.7.0",
-        "pydantic": "2.14.2",
-        "pydantic-core": "2.50.2",
-        "pygments": "2.21.0",
-        "pytest": "9.0.3",
-        "sniffio": "1.3.1",
-        "typing-extensions": "4.16.0",
-        "typing-inspection": "0.4.4"
-      },
-      "images": {
-        "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/selftest.py), run with no network",
-        "asofbench/egress": "built from env/egress, on the base image above",
-        "per_run": "each run records the IDs of the two images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
-      }
+    "python": "3.12.16",
+    "base_image": "python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159",
+    "lock": "reader/requirements.txt, compiled from reader/requirements.in with hashes by uv 0.7.2: the reader image installs it hash-checked, from wheels only, and checks the installed packages against it at its build; grep at D's image, built FROM the reader image, installs no package",
+    "python_packages": {
+      "annotated-types": "0.8.0",
+      "anthropic": "0.78.0",
+      "anyio": "4.15.1",
+      "certifi": "2026.10.23",
+      "distro": "1.9.0",
+      "docstring-parser": "0.18.0",
+      "h11": "0.16.0",
+      "httpcore": "1.0.9",
+      "httpx": "0.28.1",
+      "idna": "3.20",
+      "iniconfig": "2.3.1",
+      "jiter": "0.18.0",
+      "packaging": "26.3",
+      "pluggy": "1.7.0",
+      "pydantic": "2.14.2",
+      "pydantic-core": "2.50.2",
+      "pygments": "2.21.0",
+      "pytest": "9.0.3",
+      "sniffio": "1.3.1",
+      "typing-extensions": "4.16.0",
+      "typing-inspection": "0.4.4"
+    },
+    "images": {
+      "asofbench/grep-at-d": "built from grep-at-d/Dockerfile with systems/ as the context, FROM asofbench/reader by its local tag: the reader image with grep at D's agent and its self-test (grep-at-d/agent.py and grep-at-d/selftest.py, at /app/grep_at_d) and its command, grep_at_d, added, and nothing else; its build ends with grep_at_d --self-test, run with no network",
+      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above, with the packages above: the reader's runner and its self-test, the shared package and the network check, the image the single-call entrants answer in; its build ends with answer_requests --self-test, run with no network",
+      "asofbench/egress": "built from env/egress, on the base image above",
+      "asofbench/sandbox": "built from grep-at-d/sandbox/Dockerfile with that directory as the context, on its own base image and with its own packages (sandbox below); its build ends with the command server's self-test, run with no network"
     },
     "sandbox": {
       "base_image": "debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04",
       "debian_snapshot": "20261027T000000Z",
-      "packages": "gawk and python3 and their dependencies, from the snapshot (sandbox.packages)",
-      "image": "asofbench/sandbox, built from grep-at-d/sandbox/Dockerfile"
+      "packages": "gawk and python3 and their dependencies, from the snapshot (sandbox.packages)"
     },
-    "per_run": "each date's run records the IDs of the three images it ran with, the reader's, the proxy's and the sandbox's, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
+    "per_run": "each date's run records in its run.json the IDs of the four images it ran with, grep at D's, the reader's that it is built from, the proxy's and the sandbox's, which its launcher gives in ASOFBENCH_IMAGE_IDS; run_dates.py checks first that grep at D's image is built on that reader image"
   }
 }

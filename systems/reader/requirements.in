@@ -1,0 +1,18 @@
+# The reader image's Python dependencies. requirements.txt pins every package with its hashes; it is
+# compiled in this directory with uv 0.7.2 by the command its header records.
+#
+# anthropic 0.78.0, the lowest release whose messages.create takes all three things that every
+# answering call sends (PREREGISTRATION.md section 11): output_config with effort, the json_schema
+# output format (output_config.format) and adaptive thinking, thinking={"type": "adaptive"}. The
+# SDK's CHANGELOG.md gives 0.77.0 (2026-01-29) "add support for Structured Outputs in the Messages
+# API" and "migrate sending message format in output_config rather than output_format", and 0.78.0
+# (2026-02-05) "Release Claude Opus 4.6, adaptive thinking, and other features"; and the packages
+# agree: 0.77.1, the release before 0.78.0, has an OutputConfigParam with format only and a
+# ThinkingConfigParam with no adaptive type, and 0.78.0 has effort ("low", "medium", "high" or
+# "max") beside format in OutputConfigParam and ThinkingConfigAdaptiveParam in ThinkingConfigParam.
+# It is of the SDK's 0.x line, built on httpx, as Graphiti's 0.111.0 is; every other package is at
+# the latest version that the resolver chose, at the date the header records.
+anthropic==0.78.0
+# pytest runs the answering and client tests inside the image (systems/tests/test_answer.py and
+# test_llm_client.py), at the version that Graphiti's image installs.
+pytest==9.0.3

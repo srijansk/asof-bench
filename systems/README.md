@@ -1,6 +1,6 @@
 # Systems
 
-This directory holds what runs the systems that v0.1 enters ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)): each registered system's adapter and committed configuration, in a directory of its own; the code the adapters share, in `common/`; the run environment they all run in, in `env/`; and the tests of all three, in `tests/`. A system's committed configuration records its network policy (the routes out and the services inside, and that no provider-side tool is on) and what was installed.
+This directory holds what runs the systems that v0.1 enters ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)): each registered system's adapter and committed configuration, in a directory of its own; the code the adapters share, in `common/`; the run environment they all run in, in `env/`; the answering harness, `harness.py`, and the reader image in which the single-call entrants answer, in `reader/`; and the tests of all of them, in `tests/`. A system's committed configuration records its network policy (the routes out and the services inside, and that no provider-side tool is on) and what was installed.
 
 ## The environment rule
 
@@ -54,3 +54,31 @@ uv run --frozen --extra dev pytest systems/tests
 ```
 
 `env/embedder/requirements.txt` is compiled from `requirements.in` by the command its header records, run in `env/embedder/` with uv 0.7.2.
+
+## Answering: the harness and the reader
+
+A system receives each item's question text and nothing else, and the harness that runs it keeps the rest ([section 8](../PREREGISTRATION.md#8-arms-and-the-dated-revision-stream)). `harness.py`, on the host, writes a run's requests, each under a random key, and keeps each key's item, arm, run and answer type to itself; a system's container answers each request; and `harness.py` turns the answers into the answer rows of [section 12](../PREREGISTRATION.md#12-answers-and-scoring), which `asofbench score` scores. The single-call entrants (closed book, and long context and the oracle, whose requests add a context) answer in the reader image, `reader/`, whose runner, `answer_requests`, makes one call per request with the registered settings of `common/asofbench_systems/answer.py`: `max_tokens` 32000, adaptive thinking, effort medium and the answer's JSON schema, with no temperature, top_p or top_k, no prefill and no tool. Each entrant's prompts, settings and network policy are in its directory's `config.json`, such as [closed-book/config.json](closed-book/config.json). Before a system's configuration is fixed, run it on the toy world ([examples/toy_world.py](../examples/toy_world.py)), never on data/v0.1 ([section 11](../PREREGISTRATION.md#11-systems-model-and-runs)).
+
+A run directory, which `harness.py requests` makes outside the repository, holds `input/requests.jsonl`, the requests and nothing else; `output/`, where the container writes; and, beside them, `keys.jsonl` and `plan.json`, which hold each request's item and never leave the host. Mount `input/` and `output/`, never the run directory itself: the reader refuses a requests file that is not alone in its directory. Build the reader's image with `docker build`, not `docker compose build`, which would also rebuild the egress image, whose ID every run records. The key file's path and the images' IDs reach the run as in Graphiti's ([graphiti/README.md](graphiti/README.md#running-an-ingestion)); the reader refuses to start without the IDs. A pilot run of closed book, from the requests to the rows:
+
+```bash
+RUN="$PWD/../asofbench-runs/closed-book-pilot"
+uv run python systems/harness.py requests --system closed-book --data data/v0.1 --out-dir "$RUN" \
+    --items data/v0.1/pilot.json
+docker build -t asofbench/reader -f systems/reader/Dockerfile systems
+image_id() { docker image inspect --format '{{.Id}}' "$1"; }
+export ASOFBENCH_RUN_INPUT="$RUN/input" ASOFBENCH_RUN_OUTPUT="$RUN/output"
+export ASOFBENCH_ANTHROPIC_KEY_FILE="$HOME/.config/asofbench/anthropic_api_key"
+export ASOFBENCH_IMAGE_IDS="reader=$(image_id asofbench/reader),egress=$(image_id asofbench/egress)"
+docker compose -f systems/reader/compose.yaml -p asofbench-reader-pilot run --rm reader \
+    answer_requests --requests /input/requests.jsonl --out /output/responses.jsonl --model claude-haiku-5-5
+docker compose -f systems/reader/compose.yaml -p asofbench-reader-pilot logs --no-log-prefix egress > "$RUN/output/egress.log"
+docker compose -f systems/reader/compose.yaml -p asofbench-reader-pilot down
+uv run python systems/harness.py rows --system closed-book --run-dir "$RUN" --out "$RUN/answers.jsonl"
+```
+
+`answer_requests` first runs the network check, with the flags every system gives it, no services and the mounts `/input`, `/output` and `/run/secrets`, and answers nothing unless every check passes. It then answers the requests eight at a time, in the file's order, writing one response per request to `output/responses.jsonl` and every model call to `output/usage.jsonl` under the request's key, and records each invocation in `output/run.json`. Its exit status is 0 when every request has a response with an answer; 1 when every request has a response and some of them hold an error code instead of an answer (`refusal`, `max_tokens`, `unparseable`, or `api_error` for an API error that is the request's own, such as a prompt longer than the context window); 2 when it is refused before it starts, the network check fails, or an infrastructure error stops it (after the SDK's retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key), and then the request under way has no response; and 4 when it crashes, which run.json records with the exception's class. After a status of 2, run the same command with `--resume`: it checks that the requests file and the model are those the run began with, and answers every request that has no response, so that an outage never gives a request a null answer. An invocation killed outright leaves `run.lock` in `output/`, and every later invocation exits at once with status 2, naming the lock's holder and the age of its heartbeat: check that no invocation runs (`docker compose -f systems/reader/compose.yaml -p <run> ps -a --status running` must list no `<run>-reader-run-<id>` container), then remove `run.lock` and resume.
+
+`harness.py rows` writes one row per request with the nine fields of section 12, the answer shaped by the item's answer type and in no other way, and a null answer for a request that the system could not answer. A key with no response at all, which a run that stopped and was not resumed leaves, gets a row with a null answer and null costs, and `rows` exits 1: resume the run first. The rows carry the name that `--system` gives, the system's own or, for a toy run, an outside entry's that an entries file declares to `asofbench score` ([examples/README.md](../examples/README.md)).
+
+The tests run without Docker and without the model. `test_harness.py` runs the harness on the toy world and scores its rows; `test_answer_requests.py` runs the reader's runner with a stand-in for the call; `test_reader_wiring.py` checks the image, the compose file, the lock and closed book's configuration against the code; and `test_answer.py` checks the answering call field by field with the SDK that the reader's lock pins, which the repository's environment does not install, so CI runs it, with the shared client's tests, as `uv run --frozen --extra dev --with anthropic==0.78.0 --with httpx==0.28.1 python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py`. Inside the image, with no network, all of them run as `docker run --rm --network none -v "$PWD/systems:/systems:ro" asofbench/reader python -m pytest -p no:cacheprovider /systems/tests`, where those that need git or the asofbench package skip. `reader/requirements.txt` is compiled from `requirements.in` by the command its header records, run in `reader/` with uv 0.7.2.

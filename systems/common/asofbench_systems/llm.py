@@ -6,8 +6,10 @@ model alike (PREREGISTRATION.md section 11).
 - sends every request to ``https://api.anthropic.com``, given in code, so that it never reads
   ``ANTHROPIC_BASE_URL`` (the SDK reads that variable only when no base URL is given);
 - authenticates with the key read from one file, by default the Docker secret
-  ``/run/secrets/anthropic_api_key``; given a key, the SDK reads no credential from the
-  environment, so neither ``ANTHROPIC_API_KEY`` nor ``ANTHROPIC_AUTH_TOKEN`` is ever sent;
+  ``/run/secrets/anthropic_api_key``, and with nothing else: given a key, the SDK reads no
+  ``ANTHROPIC_API_KEY``, and the client's bearer token is cleared, since an SDK such as the
+  reader's 0.78.0 still reads ``ANTHROPIC_AUTH_TOKEN`` beside a key that it is given (Graphiti's
+  0.111.0 does not), so neither variable is ever sent;
 - reaches the API through the SDK's own httpx client, which honours ``HTTPS_PROXY`` and
   ``NO_PROXY`` from the container's environment: inside the run environment that is the egress
   proxy, the one route out;
@@ -93,5 +95,13 @@ def make_async_client(key_file: str = KEY_FILE, *, max_retries: int = 8, timeout
     # The SDK's own client keeps its connection limits and keep-alive settings, and builds its
     # proxy mounts from HTTPS_PROXY and NO_PROXY.
     http_client = anthropic.DefaultAsyncHttpxClient(**options)
-    return anthropic.AsyncAnthropic(api_key=key, base_url=BASE_URL, max_retries=max_retries,
-                                    timeout=timeout_s, http_client=http_client)
+    client = anthropic.AsyncAnthropic(api_key=key, base_url=BASE_URL, max_retries=max_retries,
+                                      timeout=timeout_s, http_client=http_client)
+    # The key alone authenticates. anthropic 0.78.0, the reader's SDK, reads ANTHROPIC_AUTH_TOKEN
+    # from the environment even when it is given a key, and sends the token as a bearer token
+    # beside the key; with no token it sends none, as every request it makes reads the attribute
+    # anew. On 0.111.0, Graphiti's, which consults the environment only when it is given no
+    # credential, the token is None already. (A copy of the client, such as with_options makes,
+    # would read the variable again on 0.78.0; the reader makes none.)
+    client.auth_token = None
+    return client

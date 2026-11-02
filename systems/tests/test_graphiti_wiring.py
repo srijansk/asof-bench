@@ -1,13 +1,13 @@
 """How Graphiti uses what the systems share: the values it gives the shared run plumbing
 (common/asofbench_systems/run.py, tested in test_run.py), which are its infrastructure errors, its
-image names and README, its network-check arguments, services, mounts and waits; the names it
-takes from that module and defines none of; and the Dockerfile's list of the shared package's
-files against the ones that the adapter imports. Standard library only."""
+image names and README, and its network check's services, mounts and waits; the names it takes
+from that module and defines none of, the network check's shared flags among them; and the
+Dockerfile's list of the shared package's files against the ones that the adapter imports.
+Standard library only."""
 
 from __future__ import annotations
 
 import ast
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +15,11 @@ from pathlib import Path
 import pytest
 from asofbench_systems import run as plumbing
 from graphiti import ingest
+from image_files import (
+    copied_shared_files,
+    shared_file_differences,
+    shared_files_needed,
+)
 
 GRAPHITI = Path(__file__).resolve().parents[1] / "graphiti"
 PACKAGE = GRAPHITI.parent / "common" / "asofbench_systems"
@@ -22,8 +27,8 @@ IMAGES = {name: "sha256:" + str(n) * 64 for n, name in enumerate(ingest.IMAGE_NA
 # The names that ingest.py takes from the shared module, and so must not define.
 SHARED_NAMES = ("Refused", "Stop", "hold_lock", "cancelled_on_sigterm", "recorded", "write_json",
                 "read_jsonl", "drop_unfinished_line", "utc_now", "new_invocation", "NETCHECK",
-                "RUN", "EXIT_DONE", "EXIT_FAILED", "EXIT_STOPPED", "EXIT_FAILURES",
-                "EXIT_CRASHED")
+                "NETCHECK_ARGS", "RUN", "EXIT_DONE", "EXIT_FAILED", "EXIT_STOPPED",
+                "EXIT_FAILURES", "EXIT_CRASHED")
 
 
 def failure(module: str, name: str) -> type[Exception]:
@@ -141,75 +146,8 @@ def test_graphiti_s_network_check_gets_its_services_mounts_and_waits(tmp_path, m
 # The Dockerfile copies the shared package's files one by one, and the build's self-test imports
 # the adapter only, which imports neither ingest.py nor the shared run.py: a file that ingest.py
 # needs and the Dockerfile lacks would fail only when the container first ran ingest, and the
-# tests that run inside the image read the files they are given, not the image's own. The
-# functions below read the Dockerfile and the imports as the build and the interpreter do.
-
-
-def copied_shared_files(dockerfile: str) -> set[str]:
-    """The files of the shared package that the COPY instructions of ``dockerfile`` copy. Docker
-    reads a line that starts with # as a comment wherever it falls, and a backslash at the end of
-    a line as continuing the instruction on the next, so a path named in a comment or in another
-    instruction copies nothing."""
-    instructions, current = [], ""
-    for line in dockerfile.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        if line.rstrip().endswith("\\"):
-            current += line.rstrip()[:-1] + " "
-        else:
-            instructions.append(current + line)
-            current = ""
-    if current:
-        instructions.append(current)
-    copied = set()
-    for instruction in instructions:
-        words = instruction.split()
-        if words and words[0].upper() == "COPY":
-            sources = [word for word in words[1:] if not word.startswith("--")][:-1]
-            copied |= {match[1] for source in sources
-                       if (match := re.fullmatch(r"common/asofbench_systems/(\w+\.py)", source))}
-    return copied
-
-
-def shared_files_imported_by(path: Path, package: Path) -> set[str]:
-    """The files of the shared package, at ``package``, that the module at ``path`` imports. A
-    relative import names a shared file only in a module of the package itself, where a single
-    dot is the package; in any other module it names that module's own package."""
-    inside = path.parent == package
-    files = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if node.level == 0 and module == "asofbench_systems":
-                files |= {f"{alias.name}.py" for alias in node.names}
-            elif node.level == 0 and module.startswith("asofbench_systems."):
-                files.add(f"{module.split('.')[1]}.py")
-            elif node.level == 1 and inside and module:
-                files.add(f"{module.split('.')[0]}.py")
-            elif node.level == 1 and inside:
-                files |= {f"{alias.name}.py" for alias in node.names}
-        elif isinstance(node, ast.Import):
-            files |= {f"{alias.name.split('.')[1]}.py" for alias in node.names
-                      if alias.name.startswith("asofbench_systems.")}
-    return files
-
-
-def shared_files_needed(entries: list[Path], package: Path) -> set[str]:
-    """The files of the shared package that the modules at ``entries`` import, and those that
-    those import in turn, with the package's ``__init__.py``."""
-    needed, pending = {"__init__.py"}, list(entries)
-    while pending:
-        for name in shared_files_imported_by(pending.pop(), package) - needed:
-            needed.add(name)
-            pending.append(package / name)
-    return needed
-
-
-def shared_file_differences(dockerfile: str, needed: set[str]) -> tuple[set[str], set[str]]:
-    """The needed shared files that the Dockerfile does not copy, and those it copies that are
-    not needed."""
-    copied = copied_shared_files(dockerfile)
-    return needed - copied, copied - needed
+# tests that run inside the image read the files they are given, not the image's own.
+# image_files.py reads the Dockerfile and the imports as the build and the interpreter do.
 
 
 def test_the_image_copies_the_shared_files_that_graphiti_imports_and_no_others():

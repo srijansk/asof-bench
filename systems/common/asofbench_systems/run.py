@@ -14,8 +14,8 @@
 - ``parse_image_ids``, the IDs of the images a run uses, as the launcher gives them in
   ASOFBENCH_IMAGE_IDS;
 - ``wait_for_services`` and ``netcheck_preflight``: the wait for the services a system runs and
-  the network check (env/netcheck.py), whose report goes to netcheck.json in the output
-  directory;
+  the network check (env/netcheck.py) with the flags that every system gives it
+  (``NETCHECK_ARGS``), whose report goes to netcheck.json in the output directory;
 - ``infrastructure_error`` and ``Stop``: which exceptions stop a run because the infrastructure
   failed (the API, or a service the system runs, is unavailable) and not because of the work
   item, and the first reason to stop the run.
@@ -34,8 +34,8 @@ records with the exception's class. A system may name the status 0 for what its 
 Graphiti's ingestion does.
 
 Nothing here belongs to one system: a system gives the table of its infrastructure errors, the
-names of its images, its services, mounts and network-check arguments, the waits and the README
-that its refusals point at as arguments. It uses only the standard library.
+names of its images, its services and mounts, the waits and the README that its refusals point at
+as arguments. It uses only the standard library.
 """
 
 from __future__ import annotations
@@ -59,6 +59,17 @@ from pathlib import Path
 # The files of an output directory that every system's run names the same way: the network
 # check's report, the record of the run's invocations, and the lock.
 NETCHECK, RUN, LOCK = "netcheck.json", "run.json", "run.lock"
+# The network check's flags that every system gives it, as systems/README.md runs the check: the
+# proxy, the one target that it must let through, the targets it must refuse (code and package
+# hosts, the corpora's live sources and the host's own names), and two addresses that must be out
+# of reach without the proxy. ``netcheck_preflight`` adds the system's services and mounts.
+NETCHECK_ARGS = (
+    "--proxy", "http://egress:3128", "--allow", "api.anthropic.com:443",
+    "--deny", "github.com:443,huggingface.co:443,pypi.org:443,peps.python.org:443,"
+              "eips.ethereum.org:443,ercs.ethereum.org:443",
+    "--deny", "host.docker.internal:443,gateway.docker.internal:443",
+    "--direct", "140.82.112.3:443,1.1.1.1:443",
+)
 EXIT_DONE, EXIT_FAILED, EXIT_STOPPED, EXIT_FAILURES, EXIT_CRASHED = 0, 1, 2, 3, 4
 # Seconds between the touches that show a held lock's invocation is alive.
 LOCK_HEARTBEAT_S = 30.0

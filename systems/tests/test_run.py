@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import threading
@@ -423,6 +424,28 @@ def test_a_system_with_no_services_or_mounts_passes_the_flags_with_nothing_after
     assert json.loads((tmp_path / "netcheck.json").read_text(encoding="utf-8")) == [
         "--exit", "0", "--services", "", "--mounts", "", "--report",
         str(tmp_path / "netcheck.json")]
+
+
+def readme_netcheck_words() -> list[str]:
+    """The words of the network check's command line in systems/README.md, its continuation lines
+    joined, as the shell splits them."""
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    commands = [line for block in re.findall(r"```bash\n(.*?)```", readme, re.S)
+                for line in block.replace("\\\n", " ").splitlines()
+                if "netcheck.py" in line and "--proxy" in line]
+    (command,) = commands
+    return shlex.split(command)
+
+
+def test_the_flags_every_system_gives_the_check_are_those_of_the_readme_s_command():
+    words = readme_netcheck_words()
+    # The README runs the check by hand, with the embedder as its one service; the flags before
+    # --services are the ones that every system's run gives it.
+    shared = words[words.index("/tmp/netcheck.py") + 1:words.index("--services")]
+    assert tuple(shared) == run.NETCHECK_ARGS
+    assert run.NETCHECK_ARGS[:4] == ("--proxy", "http://egress:3128", "--allow",
+                                     "api.anthropic.com:443")
+    assert not {"--services", "--mounts", "--report"} & set(run.NETCHECK_ARGS)
 
 
 def test_the_network_check_waits_for_a_service_that_is_not_up_yet(tmp_path):

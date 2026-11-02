@@ -70,10 +70,11 @@ records its invocation in run.json.
 What every system's run shares (the lock, the SIGTERM handling, run.json's invocation records
 and their atomic writes, the network check and the wait for the services, the image IDs, the
 classification of infrastructure errors, the stop and the exit statuses) is in
-``asofbench_systems.run``. This module gives it Graphiti's own values (``INFRASTRUCTURE``,
-``IMAGE_NAMES``, ``SERVICES``, ``NETCHECK_ARGS``, ``MOUNTS`` and the waits) and re-exports its
-names, so that ``infrastructure_error``, ``parse_image_ids`` and ``netcheck_preflight`` here are
-the shared functions with those values given, and ``EXIT_INGESTED`` is its ``EXIT_DONE``.
+``asofbench_systems.run``, with the network check's flags that every system gives it
+(``NETCHECK_ARGS``). This module gives it Graphiti's own values (``INFRASTRUCTURE``,
+``IMAGE_NAMES``, ``SERVICES``, ``MOUNTS`` and the waits) and re-exports its names, so that
+``infrastructure_error``, ``parse_image_ids`` and ``netcheck_preflight`` here are the shared
+functions with those values given, and ``EXIT_INGESTED`` is its ``EXIT_DONE``.
 
 The state, log and summary functions use only the standard library; graphiti-core and anthropic
 are imported only by adapter.open_engine.
@@ -104,6 +105,7 @@ from asofbench_systems.run import (
     EXIT_FAILURES,
     EXIT_STOPPED,
     NETCHECK,
+    NETCHECK_ARGS,
     RUN,
     Refused,
     Stop,
@@ -161,16 +163,10 @@ IMAGE_NAMES = ("graphiti", "egress", "embedder", "neo4j")
 # Where this system's refusals point for what to do next.
 README = "systems/graphiti/README.md"
 # The network check, as systems/README.md runs it, with this system's services and mounts:
-# NETCHECK_ARGS are the flags that every system gives it, and the run adds ``--services
-# embedder:8080,neo4j:7687`` (SERVICES, sorted) and ``--mounts /input,/output,/run/secrets``.
+# NETCHECK_ARGS are the flags that every system gives it (asofbench_systems.run), and the run adds
+# ``--services embedder:8080,neo4j:7687`` (SERVICES, sorted) and ``--mounts
+# /input,/output,/run/secrets``.
 NETCHECK_SCRIPT = Path(__file__).resolve().parents[1] / "env" / "netcheck.py"
-NETCHECK_ARGS = (
-    "--proxy", "http://egress:3128", "--allow", "api.anthropic.com:443",
-    "--deny", "github.com:443,huggingface.co:443,pypi.org:443,peps.python.org:443,"
-              "eips.ethereum.org:443,ercs.ethereum.org:443",
-    "--deny", "host.docker.internal:443,gateway.docker.internal:443",
-    "--direct", "140.82.112.3:443,1.1.1.1:443",
-)
 SERVICES = (("neo4j", 7687), ("embedder", 8080))
 MOUNTS = ("/input", "/output", "/run/secrets")
 # How long the run waits for the services to accept connections (the embedder loads its model

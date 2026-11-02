@@ -29,7 +29,9 @@ directory stops at once. Then, for each file in dates.json's order:
    repository. The directory's name, ``tree-`` and random letters, says nothing of the arm or the
    date, since a bind mount's source shows in the sandbox's mount table; and every directory of
    the tree is made 0755 and every file 0644, whatever the umask, so that the sandbox's user, uid
-   10001, reads it on any Docker host;
+   10001, reads it on any Docker host. A tree that is not built whole (materialize refuses it, or
+   anything goes wrong while it is built, a SIGTERM among them) is deleted at once, and the date
+   is not run;
 3. grep at D's environment (compose.yaml) answers the date's requests: ``docker compose run`` of
    the agent, with ASOFBENCH_RUN_INPUT the date's input/<file>/, ASOFBENCH_RUN_OUTPUT its
    output/<file>/ and ASOFBENCH_RUN_TREE the tree, which the sandbox holds read-only at /repo; no
@@ -237,18 +239,23 @@ def log_path(output: Path) -> Path:
 
 def build_tree(entry: dict, streams_dir: Path, data: Path, trees_dir: Path) -> Path | None:
     """The date's tree, in a fresh directory under ``trees_dir`` whose name says nothing of the
-    date, readable by every user; None when ``asofbench materialize`` refuses (the directory is
-    removed again)."""
+    date, readable by every user; None when ``asofbench materialize`` refuses. The directory is
+    removed again unless the tree is built whole: when materialize refuses, and on any exception
+    while the tree is built (a full disk, or the ``Terminated`` of a SIGTERM)."""
     tree = Path(tempfile.mkdtemp(prefix="tree-", dir=trees_dir))
-    built = cli.main(["materialize", "--stream", str(streams_dir / STREAM_FILES[entry["arm"]]),
-                      "--as-of", entry["as_of"], "--out", str(tree), "--arm", entry["arm"],
-                      "--data", str(data)])
-    if built != 0:
-        shutil.rmtree(tree)
-        return None
-    for path in [tree, *tree.rglob("*")]:
-        os.chmod(path, TREE_DIRECTORY_MODE if path.is_dir() else TREE_FILE_MODE)
-    return tree
+    built = False
+    try:
+        if cli.main(["materialize", "--stream", str(streams_dir / STREAM_FILES[entry["arm"]]),
+                     "--as-of", entry["as_of"], "--out", str(tree), "--arm", entry["arm"],
+                     "--data", str(data)]) != 0:
+            return None
+        for path in [tree, *tree.rglob("*")]:
+            os.chmod(path, TREE_DIRECTORY_MODE if path.is_dir() else TREE_FILE_MODE)
+        built = True
+        return tree
+    finally:
+        if not built:
+            shutil.rmtree(tree)
 
 
 def run_date(name: str, entry: dict, run_dir: Path, data: Path, streams_dir: Path,
@@ -260,13 +267,15 @@ def run_date(name: str, entry: dict, run_dir: Path, data: Path, streams_dir: Pat
     began or the environment could not be taken down."""
     output = run_dir / harness.OUTPUT / name
     before = date_record(output)
-    tree = build_tree(entry, streams_dir, data, trees_dir)
-    if tree is None:
-        progress(f"run_dates.py: {name}: its tree could not be built (asofbench materialize "
-                 "refused it), so nothing was run")
-        return EXIT_STOPPED
-    down = None
+    # The build is inside the block that deletes the tree, so that a SIGTERM just after it is
+    # built still deletes it; build_tree deletes a tree that it did not build whole.
+    tree = down = None
     try:
+        tree = build_tree(entry, streams_dir, data, trees_dir)
+        if tree is None:
+            progress(f"run_dates.py: {name}: its tree could not be built (asofbench materialize "
+                     "refused it), so nothing was run")
+            return EXIT_STOPPED
         env = {**environ,
                "ASOFBENCH_RUN_INPUT": str((run_dir / harness.INPUT / name).resolve()),
                "ASOFBENCH_RUN_OUTPUT": str(output.resolve()),
@@ -287,7 +296,8 @@ def run_date(name: str, entry: dict, run_dir: Path, data: Path, streams_dir: Pat
             finally:
                 down = compose(project, ["down"], env)
     finally:
-        shutil.rmtree(tree)
+        if tree is not None:
+            shutil.rmtree(tree)
     if down != 0:
         progress(f"run_dates.py: {name}: the environment could not be taken down (docker compose "
                  f"down exited {down}): check `docker compose -p {project} ps -a` before running "

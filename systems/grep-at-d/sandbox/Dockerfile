@@ -11,8 +11,10 @@
 # digest. bash, coreutils, grep, findutils and sed come with it, as Debian's essential packages;
 # gawk, and python3 for the command server, are installed from the snapshot of the Debian archive
 # at the time the base image was built, so that a rebuild installs the same versions: the image's
-# own package sources are removed, and the snapshot's are the only ones apt reads. The build log
-# lists the version of each package the sandbox's commands use.
+# own package sources are removed, and the snapshot's are the only ones apt reads. They are signed
+# by trixie's archive keyring, debian-archive-keyring.pgp, the file that the image's own sources
+# name; its .gpg name is only a compatibility link to it. The build log lists the version of each
+# package the sandbox's commands use.
 FROM debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04
 
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
@@ -21,14 +23,14 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
        'URIs: http://snapshot.debian.org/archive/debian/20261027T000000Z' \
        'Suites: trixie trixie-updates' \
        'Components: main' \
-       'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+       'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
        'Check-Valid-Until: no' \
        '' \
        'Types: deb' \
        'URIs: http://snapshot.debian.org/archive/debian-security/20261027T000000Z' \
        'Suites: trixie-security' \
        'Components: main' \
-       'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+       'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
        'Check-Valid-Until: no' \
        > /etc/apt/sources.list.d/snapshot.sources \
     && apt-get update \

@@ -441,6 +441,9 @@ def test_the_command_line_refuses_what_it_cannot_run(layout, monkeypatch, capsys
             "--out", str(layout / "output" / "responses.jsonl")]
     for argv in ([], args, [*args, "--model", "claude-opus-5-5"],
                  ["--self-test", "--model", MODEL],
+                 # The carried count is a run's, of which the self-test has none, even at 0.
+                 ["--self-test", "--api-errors-before", "0"],
+                 ["--self-test", "--api-errors-before", "3"],
                  [*args, "--model", MODEL, "--api-errors-before", "-1"],
                  [*args, "--model", MODEL, "--api-errors-before", "two"]):
         with pytest.raises(SystemExit) as caught:

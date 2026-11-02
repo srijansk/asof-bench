@@ -1,26 +1,30 @@
 """Grep at D's runner of the dates, on the host (grep-at-d/run_dates.py), on the toy world with its
 streams registered, with a stand-in for `docker compose` whose runs answer with the reader's own
 runner, in-process, and a stand-in for the answering call: for each arm and date it builds that
-date's tree with `asofbench materialize`, in a fresh directory with a name that says nothing of
-the date, outside the repository and readable by the sandbox's user, gives that tree and that
-date's input and output directories alone to the date's run, and deletes the tree whatever the run
-did; the count of api_error responses in a row goes on across the dates, so that five in a row
-stop the run wherever they fall; it resumes a date that stopped, never one that api_error
-responses stopped, skips a date that is done, stops on a run that the environment did not start
-or a SIGTERM, takes the environment down whatever happened, holds the run directory's lock, checks
-that grep at D's image is built on the reader image whose ID the run records, and refuses what it
-cannot run before it builds anything. It needs git, which builds the toy world's repositories, and
-the asofbench package, so the images skip it; it makes no model call and reads no v0.1 file."""
+date's tree with `asofbench materialize`, in a fresh directory with a name that says nothing of the
+date, outside the repository and readable by the sandbox's user, gives that tree and that date's
+input and output directories alone to the date's run, and deletes the tree whatever the run did, and
+a tree whose build fails or is stopped; the count of api_error responses in a row goes on across the
+dates, so that five in a row stop the run wherever they fall; it resumes a date that stopped, never
+one that api_error responses stopped, skips a date that is done, stops on a run that the environment
+did not start or a SIGTERM (a real one, sent to the command running in a process of its own), takes
+the environment down whatever happened, holds the run directory's lock, checks that grep at D's
+image is built on the reader image whose ID the run records, and refuses what it cannot run before
+it builds anything. It needs git, which builds the toy world's repositories, and the asofbench
+package, so the images skip it; it makes no model call and reads no v0.1 file."""
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import re
 import shutil
 import signal
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -391,6 +395,99 @@ def test_a_sigterm_stops_the_run_after_the_environment_is_down_and_the_tree_dele
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+# A process that runs run_dates.py's command line on a toy layout, with a stand-in for `docker
+# compose` whose `run` waits, as a date's run does while its requests are answered, and that
+# records each command it is given with the tree it was given; the test sends it a real SIGTERM.
+DRIVER = """
+import json, sys, time
+from pathlib import Path
+settings = json.loads(sys.argv[1])
+sys.path[:0] = settings["path"]
+import grep_modules
+run_dates = grep_modules.run_dates()
+
+def compose(project, arguments, env, stdout=None):
+    with open(settings["record"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps([arguments[0], env["ASOFBENCH_RUN_TREE"]]) + "\\n")
+    if arguments[0] in ("logs", "down"):
+        return 0
+    Path(settings["started"]).write_text("", encoding="utf-8")
+    time.sleep(120)
+    return 0
+
+run_dates.docker_compose = compose
+run_dates.image_layers = settings["layers"].__getitem__
+sys.exit(run_dates.main(settings["argv"]))
+"""
+
+
+def test_a_sigterm_sent_to_the_running_command_takes_the_date_down_and_deletes_its_tree(setup,
+                                                                                      tmp_path):
+    # The signal comes from outside, while the first date's run is under way, so that it is
+    # run()'s own handler that turns it into Terminated: without the handler the process would
+    # die of the signal with every finally block skipped.
+    started, record = tmp_path / "started", tmp_path / "commands.jsonl"
+    argv = ["--run-dir", str(setup["run_dir"]), "--data", str(setup["world"] / "toy-data"),
+            "--streams-dir", str(setup["world"] / "streams"), "--trees-dir", str(setup["trees"]),
+            "--model", MODEL, "--project", "asofbench-grep-at-d-test"]
+    settings = {"path": [entry for entry in sys.path if entry], "argv": argv,
+                "record": str(record), "started": str(started), "layers": LAYERS}
+    environ = {**os.environ, "ASOFBENCH_ANTHROPIC_KEY_FILE": str(setup["key_file"]),
+               "ASOFBENCH_IMAGE_IDS": IMAGES}
+    process = subprocess.Popen([sys.executable, "-c", DRIVER, json.dumps(settings)], env=environ,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), process.communicate(timeout=10)
+        process.send_signal(signal.SIGTERM)
+        out, err = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    assert process.returncode == plumbing.EXIT_STOPPED, (process.returncode, err)
+    commands = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    assert [command for command, _ in commands] == ["run", "logs", "down"]
+    (tree,) = {tree for _, tree in commands}
+    assert Path(tree).parent == setup["trees"].resolve() and not Path(tree).exists()
+    assert list(setup["trees"].iterdir()) == []
+    assert not (setup["run_dir"] / "run.lock").exists()
+    assert "stopped by a SIGTERM" in out
+
+
+def test_a_tree_whose_build_fails_or_is_stopped_by_a_sigterm_is_deleted(setup, monkeypatch):
+    # asofbench materialize writes the tree's files and then fails (a full disk), or a SIGTERM,
+    # which the handler raises as Terminated, comes while it writes them: either way the tree it
+    # began is deleted, no environment starts and the lock is released.
+    materialize = cli.main
+
+    def stopped_by(stop: BaseException):
+        def main(argv: list[str]) -> int:
+            assert argv[0] == "materialize" and materialize(argv) == 0
+            assert any(Path(argv[argv.index("--out") + 1]).iterdir())
+            raise stop
+        return main
+
+    compose = environment(setup)
+    monkeypatch.setattr(cli, "main", stopped_by(OSError(errno.ENOSPC, "No space left on device")))
+    with pytest.raises(OSError, match="No space left on device"):
+        go(setup, compose)
+    assert compose.commands == [] and list(setup["trees"].iterdir()) == []
+    assert not (setup["run_dir"] / "run.lock").exists()
+    monkeypatch.setattr(cli, "main", stopped_by(run_dates.Terminated()))
+    lines = []
+    assert go(setup, compose, progress=lines.append) == plumbing.EXIT_STOPPED
+    assert compose.commands == [] and list(setup["trees"].iterdir()) == []
+    assert not (setup["run_dir"] / "run.lock").exists()
+    assert any("SIGTERM" in line for line in lines)
+    # Nothing was left half done: the next run begins every date.
+    monkeypatch.setattr(cli, "main", materialize)
+    resumed = environment(setup)
+    assert go(setup, resumed) == 0 and resumed.runs() == list(setup["dates"])
 
 
 def test_a_second_invocation_is_refused_while_one_holds_the_run_directory_s_lock(setup):

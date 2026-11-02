@@ -5,10 +5,12 @@ keyed as the request is. The reader image runs the single-call entrants, closed 
     answer_requests --requests /input/requests.jsonl --out /output/responses.jsonl \\
         --model claude-haiku-5-5|claude-sonnet-5-5 [--resume] [--api-errors-before N]
 
-Grep at D's agent (grep-at-d/agent.py), which the image holds too, answers through this runner:
-its command, ``grep_at_d``, is ``main`` with the agent's answering function, which runs a request's
-commands in the sandbox, its images (the sandbox's beside the reader's and the proxy's) and its
-network check (the sandbox as a service); everything below holds for it as written.
+Grep at D's agent (grep-at-d/agent.py) answers through this runner in an image of its own,
+asofbench/grep-at-d, built FROM this one (grep-at-d/Dockerfile), which holds nothing of grep at
+D's: its command, ``grep_at_d``, is ``main`` with the agent's answering function, which runs a
+request's commands in the sandbox, its images (its own and the sandbox's beside the reader's and
+the proxy's) and its network check (the sandbox as a service); everything below holds for it as
+written.
 
 A request is one JSON line that the harness wrote (systems/harness.py): ``key``, a random UUID4,
 ``question``, the item's question text, and, for long context and the oracle, ``context``. The
@@ -392,9 +394,10 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
          image_names: Sequence[str] = IMAGE_NAMES,
          preflight: Callable[[Path], int] = netcheck_preflight,
          self_test: Callable[[], int] | None = None) -> int:
-    """The command line of an answering run: the reader's own, or an entrant's that answers in the
-    reader image through this runner with an answering function (``ask``), images, a network
-    check and a self-test of its own, as grep at D's does (grep-at-d/agent.py)."""
+    """The command line of an answering run: the reader's own, or that of an entrant whose image is
+    built FROM the reader image and answers through this runner with an answering function
+    (``ask``), images, a network check and a self-test of its own, as grep at D's does
+    (grep-at-d/agent.py, in asofbench/grep-at-d)."""
     parser = argparse.ArgumentParser(prog=prog, description="Answers a requests file with the "
                                      "answering model, inside the run environment.",
                                      allow_abbrev=False)
@@ -404,15 +407,17 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
     parser.add_argument("--model", choices=answer.MODELS, help="the answering model")
     parser.add_argument("--resume", action="store_true",
                         help="answer the requests that have no response yet")
-    parser.add_argument("--api-errors-before", type=count, default=0, dest="api_errors_before",
+    parser.add_argument("--api-errors-before", type=count, dest="api_errors_before",
                         metavar="N", help="the api_error responses in a row that the runs before "
-                        "this one ended with, which this run counts on from (0 by default; "
-                        "grep at D's run_dates.py gives it)")
+                        "this one ended with, which this run counts on from (0 when it is not "
+                        "given; grep at D's run_dates.py gives it)")
     parser.add_argument("--self-test", action="store_true",
                         help="check the installation and the answering call, with no network")
     args = parser.parse_args(argv)
     if args.self_test:
-        if args.requests or args.out or args.model or args.resume:
+        # Not given is None, so that even --api-errors-before 0 is refused with it.
+        if (args.requests or args.out or args.model or args.resume
+                or args.api_errors_before is not None):
             parser.error("--self-test takes no other argument")
         if self_test is not None:
             return self_test()
@@ -426,7 +431,7 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
         images = parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"), image_names)
         return asyncio.run(run(args.requests, args.out, args.model, resume=args.resume,
                                images=images, ask=ask, preflight=preflight,
-                               api_errors_before=args.api_errors_before))
+                               api_errors_before=args.api_errors_before or 0))
     except Refused as refusal:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return EXIT_STOPPED

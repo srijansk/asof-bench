@@ -148,6 +148,10 @@ def test_the_sandbox_image_is_debian_stable_slim_by_digest_with_the_tools_and_no
     # installs the same versions: no other source is left in the image.
     assert "apt-get install -y --no-install-recommends gawk python3" in SANDBOX_DOCKERFILE
     assert "deb.debian.org" not in SANDBOX_DOCKERFILE
+    # Each source is signed by trixie's archive keyring, the .pgp file that the base image's own
+    # sources name (the .gpg name beside it is a compatibility link to it).
+    signed_by = re.findall(r"'Signed-By: (\S+)'", SANDBOX_DOCKERFILE)
+    assert signed_by == ["/usr/share/keyrings/debian-archive-keyring.pgp"] * 2
     assert "rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*" in SANDBOX_DOCKERFILE
     user = SANDBOX_DOCKERFILE.index("\nUSER 10001:10001\n")
     assert SANDBOX_DOCKERFILE.index("apt-get install") < user < SANDBOX_DOCKERFILE.index(

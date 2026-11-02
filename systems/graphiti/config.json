@@ -1,0 +1,167 @@
+{
+  "system": "graphiti",
+  "description": "Graphiti, self-hosted with telemetry off, building its temporal knowledge graph in Neo4j from one arm's dated revision stream (PREREGISTRATION.md sections 8, 11 and 13). adapter.py and ingest.py implement this configuration; README.md describes it.",
+  "graphiti_core": {
+    "version": "0.31.2",
+    "extras": ["anthropic"],
+    "tag_commit": "d72407dcedac911e1be9fc15b55e8c05a3efcc36",
+    "wheel": "graphiti_core-0.31.2-py3-none-any.whl",
+    "wheel_sha256": "b26e1f350482266aec24beb1cd4c58d5e32ede1a897af8fa25b10800a16bbb8d",
+    "dependency_versions": "every package at the version that graphiti-core's own uv.lock pins at the release (in graphiti_core-0.31.2.tar.gz, SHA-256 cee47010d440ae015646c722b18272c3b2e659e38ab7ed6a0fd165a15282f451)",
+    "store_raw_episode_content": true
+  },
+  "graph_database": {
+    "image": "neo4j:5.26.32-community@sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177",
+    "edition": "community",
+    "version": "5.26.32",
+    "uri": "bolt://neo4j:7687",
+    "auth": "none (NEO4J_AUTH=none); Neo4j is on the internal network only",
+    "memory": {"heap_initial": "256m", "heap_max": "512m", "pagecache": "128m", "mem_limit": "1g"},
+    "usage_report": false,
+    "store": "one named volume per run (the compose project's neo4j-data), so that each arm has its own store and arms never share one"
+  },
+  "llm": {
+    "client": "graphiti_core.llm_client.anthropic_client.AnthropicClient",
+    "config": "LLMConfig(model=\"claude-haiku-5-5\", small_model=\"claude-haiku-5-5\", temperature=anthropic.omit)",
+    "model": "claude-haiku-5-5",
+    "small_model": "claude-haiku-5-5",
+    "sampling": "no request carries temperature, top_p or top_k: the client's temperature is the SDK's omit sentinel (anthropic.omit), which the SDK leaves out of the request",
+    "max_tokens": 16384,
+    "max_tokens_source": "Graphiti's own resolution: LLMConfig's default, DEFAULT_MAX_TOKENS, unless a Graphiti call site gives its own",
+    "request": "Graphiti's own code path: its prompts and its forced tool call (tool_choice naming its response model's tool); it sends no thinking or output_config field",
+    "anthropic_client": "asofbench_systems.llm.make_async_client: anthropic.AsyncAnthropic with base_url https://api.anthropic.com given in code (ANTHROPIC_BASE_URL is never read), the key read from the Docker secret /run/secrets/anthropic_api_key only, the SDK's own httpx client honouring HTTPS_PROXY and NO_PROXY, max_retries 8, timeout 600 s",
+    "base_url": "https://api.anthropic.com",
+    "max_retries": 8,
+    "timeout_s": 600.0,
+    "sdk": "anthropic 0.111.0, which sends anthropic-version 2023-06-01",
+    "usage_log": "asofbench_systems.usage.instrument wraps client.messages.create and records every response in usage.jsonl under the episode being ingested"
+  },
+  "embedder": {
+    "client": "graphiti_core.embedder.openai.OpenAIEmbedder",
+    "base_url": "http://embedder:8080/v1",
+    "api_key": "none",
+    "embedding_dim": 2048,
+    "ingest_model": "voyage-4-nano-document",
+    "query_model": "voyage-4-nano-query",
+    "use": "voyage-4-nano-document (the model's document prompt) for every text Graphiti embeds while ingesting, the stored texts and the name searches it makes to deduplicate them; the answering path builds a second embedder with voyage-4-nano-query (the query prompt) for questions",
+    "dimensions_parameter": "not sent: OpenAIEmbedder asks for the model's own 2048 dimensions and keeps the first embedding_dim (2048) of them",
+    "server": "env/embedder (asofbench/embedder): voyage-4-nano on the CPU in float32 behind an OpenAI-compatible endpoint",
+    "model": {
+      "id": "voyageai/voyage-4-nano",
+      "revision": "5fb34e870f49f19e79c94d5e118f5ee730133279",
+      "weights": "model.safetensors",
+      "weights_sha256": "3dae0c63c81dcab79ac213af331940a1bf2b8a53ec8646be878552890291ad30",
+      "weights_bytes": 692919112,
+      "dimensions": 2048,
+      "prompts": {
+        "query": "Represent the query for retrieving supporting documents: ",
+        "document": "Represent the document for retrieval: "
+      }
+    }
+  },
+  "cross_encoder": {
+    "class": "NoReranker, a graphiti_core.cross_encoder.client.CrossEncoderClient",
+    "raises": "no reranking model is registered for asof-bench",
+    "why": "no system reranks with a model (section 11): Graphiti is given a cross-encoder whose rank raises, and searches only with reciprocal-rank-fusion recipes, so its default OpenAIRerankerClient is never created and nothing ranks with a model"
+  },
+  "search": {
+    "while_ingesting": "Graphiti's own duplicate searches: EDGE_HYBRID_SEARCH_RRF for edges (BM25 and cosine similarity fused by reciprocal rank) and exact names and a direct cosine-similarity search for nodes (_semantic_candidate_search), none with a reranker",
+    "answering": "a later plan: Graphiti.search with no center node, EDGE_HYBRID_SEARCH_RRF"
+  },
+  "episodes": {
+    "group_id": "the episode's corpus, pep or eth",
+    "order": "within a group, one at a time in stream order, each awaited before the next; the two groups concurrently",
+    "saga": "one saga per proposal, named by the episode's proposal id, with saga_previous_episode_uuid from the adapter's state (the proposal's last ingested episode)",
+    "previous_episodes": {
+      "count": 3,
+      "rule": "previous_episode_uuids is the uuids of the same proposal's last 3 ingested episodes (Graphiti's EPISODE_WINDOW_LEN), oldest first, and empty for its first episode"
+    },
+    "name": "episode_id",
+    "episode_body": "asofbench_systems.stream.render_episode, the one episode template of every store system",
+    "source": "EpisodeType.text",
+    "source_description": "{repo} commit {commit}",
+    "reference_time": "recorded_at, in UTC",
+    "entity_types": null,
+    "edge_types": null,
+    "custom_extraction_instructions": null,
+    "update_communities": false
+  },
+  "failures": "Graphiti's own retries and the SDK's apply; an episode that still raises is logged with ok false and the run goes on; ingest --resume attempts every episode the log does not record as ingested",
+  "concurrency": {
+    "semaphore_limit": 20,
+    "source": "Graphiti's DEFAULT_SEMAPHORE_LIMIT; SEMAPHORE_LIMIT is not set"
+  },
+  "telemetry": "off: GRAPHITI_TELEMETRY_ENABLED=false in the image and in the container, so Graphiti sends no telemetry event; Neo4j's usage report is off (dbms.usage_report.enabled=false); no route leads out but the one to the API",
+  "network_policy": {
+    "routes_out": [
+      {
+        "host": "api.anthropic.com",
+        "port": 443,
+        "through": "the egress proxy (env/egress, asofbench/egress) on the internal network, which opens a CONNECT tunnel to that host and port only and refuses everything else",
+        "for": "the construction model, claude-haiku-5-5, which builds Graphiti's store"
+      }
+    ],
+    "services_inside": [
+      {"name": "neo4j", "port": 7687, "holds": "Neo4j 5.26 community and the graph Graphiti writes there, on the run's own volume"},
+      {"name": "embedder", "port": 8080, "holds": "the voyage-4-nano server and the model's weights"},
+      {"name": "egress", "port": 3128, "holds": "the egress proxy, the only container also on the network with a route out"}
+    ],
+    "container": "the graphiti container is on the internal network only (internal, with no address of the host on it) and sees its adapter and configuration, the run's input stream (read-only at /input), its output directory (/output) and the API key as a Docker secret",
+    "unreachable": "data/v0.1, every file of this repository other than the adapter and its configuration, the streams other than the run's input file, the corpus clones, and the corpora's live sources (github.com/python/peps, github.com/ethereum/EIPs, github.com/ethereum/ERCs, peps.python.org, eips.ethereum.org and ercs.ethereum.org), their mirrors or a clone of them",
+    "provider_side_tools": "none: no request carries a server tool (web search, web fetch, code execution, file search or any other); the one tool in a request is Graphiti's own client tool, the schema of its response",
+    "checked_by": "env/netcheck.py, run by ingest before anything is ingested, which aborts the run on any failure; its report is netcheck.json in the run's output directory"
+  },
+  "installed": {
+    "python": "3.12.16",
+    "base_image": "python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159",
+    "lock": "requirements.txt, compiled from requirements.in with hashes; the image installs it hash-checked, from wheels only",
+    "python_packages": {
+      "annotated-types": "0.7.0",
+      "anthropic": "0.111.0",
+      "anyio": "4.15.1",
+      "backoff": "2.2.1",
+      "certifi": "2026.10.19",
+      "charset-normalizer": "3.4.4",
+      "distro": "1.9.0",
+      "docstring-parser": "0.17.0",
+      "graphiti-core": "0.31.2",
+      "h11": "0.16.0",
+      "httpcore": "1.0.9",
+      "httpx": "0.28.1",
+      "idna": "3.18",
+      "iniconfig": "2.3.0",
+      "jiter": "0.12.0",
+      "neo4j": "6.1.0",
+      "numpy": "2.4.1",
+      "openai": "2.32.0",
+      "packaging": "25.0",
+      "pluggy": "1.6.0",
+      "posthog": "7.5.1",
+      "pydantic": "2.12.5",
+      "pydantic-core": "2.41.5",
+      "pygments": "2.20.0",
+      "pytest": "9.0.3",
+      "python-dateutil": "2.9.0.post0",
+      "python-dotenv": "1.2.2",
+      "pytz": "2025.2",
+      "requests": "2.33.0",
+      "six": "1.17.0",
+      "sniffio": "1.3.1",
+      "tenacity": "9.1.2",
+      "tqdm": "4.67.1",
+      "typing-extensions": "4.16.0",
+      "typing-inspection": "0.4.2",
+      "urllib3": "2.8.0"
+    },
+    "images": {
+      "asofbench/graphiti": "built from graphiti/Dockerfile with systems/ as the context, on the base image above",
+      "asofbench/egress": "built from env/egress, on the base image above",
+      "asofbench/embedder": "built from env/embedder, on the base image above, with env/embedder/requirements.txt and the model above",
+      "neo4j": {
+        "index": "neo4j:5.26.32-community@sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177",
+        "linux/arm64": "sha256:39232fdab9f5307087e5f0c34a422887ea3e1d72b05bb7cb1553475fc736ce0b",
+        "linux/amd64": "sha256:fe8607113c4177fbd2466bf2c30f1ebab5b9530594e86487c58c98e113145192"
+      }
+    }
+  }
+}

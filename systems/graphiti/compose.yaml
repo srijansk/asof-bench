@@ -1,0 +1,105 @@
+# Graphiti's run environment (systems/README.md): the egress proxy, the embedding server, Neo4j and
+# the Graphiti container on `inner`, an internal network with no route out and no address of the
+# host on it, and the proxy alone also on `outer`. Each run is one compose project, so that its
+# Neo4j store is a volume of its own (`<project>_neo4j-data`) and arms never share one:
+#
+#     ASOFBENCH_RUN_INPUT=<a directory holding the run's input stream and no other stream> \
+#     ASOFBENCH_RUN_OUTPUT=<the run's output directory> \
+#     ASOFBENCH_ANTHROPIC_KEY_FILE=<the file that holds the API key> \
+#     docker compose -f systems/graphiti/compose.yaml -p asofbench-graphiti-<run> \
+#         run --rm graphiti ingest --stream /input/<file>.jsonl --arm H+ --out /output
+#
+# The three variables are absolute paths (compose reads a relative one from this file's directory)
+# and are needed by every compose command on this file, `down` included. The key reaches the
+# container only as the Docker secret /run/secrets/anthropic_api_key.
+#
+# Each service has a memory limit, and each is the first that the kernel stops if the machine
+# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else.
+name: asofbench-graphiti
+
+services:
+  egress:
+    image: asofbench/egress
+    build: ../env/egress
+    environment:
+      EGRESS_ALLOW: api.anthropic.com:443
+    networks:
+      - inner
+      - outer
+    mem_limit: 128m
+    oom_score_adj: 1000
+
+  embedder:
+    image: asofbench/embedder
+    build: ../env/embedder
+    networks:
+      - inner
+    mem_limit: 2560m
+    oom_score_adj: 1000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      retries: 120
+      start_period: 30s
+
+  neo4j:
+    image: neo4j:5.26.32-community@sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+      NEO4J_dbms_usage__report_enabled: "false"
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - inner
+    mem_limit: 1g
+    oom_score_adj: 1000
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7474/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  graphiti:
+    image: asofbench/graphiti
+    build:
+      context: ..
+      dockerfile: graphiti/Dockerfile
+    environment:
+      HTTPS_PROXY: http://egress:3128
+      NO_PROXY: neo4j,embedder,localhost,127.0.0.1
+      GRAPHITI_TELEMETRY_ENABLED: "false"
+    volumes:
+      - ${ASOFBENCH_RUN_INPUT:?}:/input:ro
+      - ${ASOFBENCH_RUN_OUTPUT:?}:/output
+    secrets:
+      - anthropic_api_key
+    networks:
+      - inner
+    mem_limit: 1g
+    oom_score_adj: 1000
+    depends_on:
+      egress:
+        condition: service_started
+      embedder:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+networks:
+  inner:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+  outer: {}
+
+volumes:
+  neo4j-data: {}
+
+secrets:
+  anthropic_api_key:
+    file: ${ASOFBENCH_ANTHROPIC_KEY_FILE:?}

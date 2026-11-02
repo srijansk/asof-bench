@@ -8,10 +8,12 @@ messages: the model (``MODELS``: claude-haiku-5-5 for every run, claude-sonnet-5
 sensitivity check), ``max_tokens`` 32000, ``thinking={"type": "adaptive"}``, ``output_config``
 with effort ``medium`` and the ``json_schema`` format of ``ANSWER_SCHEMA``, and the system prompt,
 ``SYSTEM_PROMPT``; it sends no ``temperature``, ``top_p`` or ``top_k``, no prefill and no tool.
-An agent's loop, such as grep at D's, sends the same settings with its own system prompt and its
-tool added. ``user_message`` is the call's one user turn: ``Question: {question}``, or with a
-context ``Context:\\n\\n{context}\\n\\nQuestion: {question}``. These strings are model-facing and
-hold no benchmark-derived value: no item id, gold value, family name or stratum.
+An agent's loop, such as grep at D's (grep-at-d/agent.py), sends the same settings on every turn
+with its own system prompt and its tool added, reads each response's costs with ``counts`` and its
+final reply with ``read_answer``, and returns its ``result`` with the commands it ran.
+``user_message`` is the call's one user turn: ``Question: {question}``, or with a context
+``Context:\\n\\n{context}\\n\\nQuestion: {question}``. These strings are model-facing and hold no
+benchmark-derived value: no item id, gold value, family name or stratum.
 
 ``answer_once(client, model, question, context)`` makes the call and returns, in this order:
 
@@ -20,7 +22,7 @@ hold no benchmark-derived value: no item id, gold value, family name or stratum.
 - ``tokens_in``: the response's input tokens, with those written to and read from the prompt
   cache; ``tokens_out``: its output tokens (0 and 0 when the call raised);
 - ``wall_s``: the call's wall time in seconds, the SDK's retries included;
-- ``tool_calls``: 0, since a single call runs no tool;
+- ``tool_calls``: 0, since a single call runs no tool (an agent gives the commands it ran);
 - ``error``: null, or the short code of a request that was not answered (``ERRORS``):
   ``refusal`` and ``max_tokens`` for a response with that stop reason, whatever its text holds,
   ``unparseable`` for a reply whose text is not a JSON object with an ``answer`` field, and
@@ -98,6 +100,16 @@ def _count(response_usage, name: str) -> int:
     return int(getattr(response_usage, name, None) or 0)
 
 
+def counts(response) -> tuple[int, int, int]:
+    """A response's input tokens, with those written to and read from the prompt cache; its output
+    tokens; and its thinking blocks."""
+    response_usage = getattr(response, "usage", None)
+    tokens_in = _count(response_usage, "input_tokens") + sum(_count(response_usage, name)
+                                                             for name in CACHE_COUNTS)
+    thinking = sum(getattr(block, "type", None) in THINKING_TYPES for block in response.content)
+    return tokens_in, _count(response_usage, "output_tokens"), thinking
+
+
 def read_answer(content) -> tuple[object, str | None]:
     """The answer that a response's text blocks hold, read as one JSON object with an ``answer``
     field, and None; or None and ``unparseable``."""
@@ -115,10 +127,12 @@ def read_answer(content) -> tuple[object, str | None]:
 
 
 def result(answer, tokens_in: int, tokens_out: int, begun: float, error: str | None,
-           thinking_blocks: int) -> dict:
+           thinking_blocks: int, tool_calls: int = 0) -> dict:
+    """What an answering function returns (``RESULT_FIELDS``, in that order), its wall time
+    measured from ``begun``."""
     return {"answer": answer, "tokens_in": tokens_in, "tokens_out": tokens_out,
-            "wall_s": round(time.monotonic() - begun, 3), "tool_calls": 0, "error": error,
-            "thinking_blocks": thinking_blocks}
+            "wall_s": round(time.monotonic() - begun, 3), "tool_calls": tool_calls,
+            "error": error, "thinking_blocks": thinking_blocks}
 
 
 async def answer_once(client, model: str, question: str, context: str | None) -> dict:
@@ -136,11 +150,7 @@ async def answer_once(client, model: str, question: str, context: str | None) ->
         if infrastructure_error(error, INFRASTRUCTURE):
             raise
         return result(None, 0, 0, begun, "api_error", 0)
-    response_usage = getattr(response, "usage", None)
-    tokens_in = _count(response_usage, "input_tokens") + sum(_count(response_usage, name)
-                                                             for name in CACHE_COUNTS)
-    tokens_out = _count(response_usage, "output_tokens")
-    thinking = sum(getattr(block, "type", None) in THINKING_TYPES for block in response.content)
+    tokens_in, tokens_out, thinking = counts(response)
     if response.stop_reason in ("refusal", "max_tokens"):
         return result(None, tokens_in, tokens_out, begun, response.stop_reason, thinking)
     answer, error = read_answer(response.content)

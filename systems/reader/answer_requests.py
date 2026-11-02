@@ -5,6 +5,11 @@ keyed as the request is. The reader image runs the single-call entrants, closed 
     answer_requests --requests /input/requests.jsonl --out /output/responses.jsonl \\
         --model claude-haiku-5-5|claude-sonnet-5-5 [--resume]
 
+Grep at D's agent (grep-at-d/agent.py), which the image holds too, answers through this runner:
+its command, ``grep_at_d``, is ``main`` with the agent's answering function, which runs a request's
+commands in the sandbox, its images (the sandbox's beside the reader's and the proxy's) and its
+network check (the sandbox as a service); everything below holds for it as written.
+
 A request is one JSON line that the harness wrote (systems/harness.py): ``key``, a random UUID4,
 ``question``, the item's question text, and, for long context and the oracle, ``context``. The
 reader refuses a line with any other field or without those two, a key that is not a UUID4 in its
@@ -83,7 +88,7 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path
 
 from asofbench_systems import answer, llm, usage
@@ -137,10 +142,10 @@ PROXY = ("egress", 3128)
 PROXY_WAIT_S, PROXY_RETRY_S = 60.0, 1.0
 
 
-def parse_image_ids(text: str | None) -> dict[str, str]:
-    """The image IDs of the reader and the egress proxy, as ``name=sha256:...`` entries;
-    Refused otherwise (``asofbench_systems.run.parse_image_ids``)."""
-    return plumbing.parse_image_ids(text, IMAGE_NAMES, README)
+def parse_image_ids(text: str | None, names: Sequence[str] = IMAGE_NAMES) -> dict[str, str]:
+    """The image IDs of ``names``, by default the reader's and the egress proxy's, as
+    ``name=sha256:...`` entries; Refused otherwise (``asofbench_systems.run.parse_image_ids``)."""
+    return plumbing.parse_image_ids(text, names, README)
 
 
 def request_problem(request) -> str | None:
@@ -211,13 +216,15 @@ def open_client(usage_log: usage.UsageLog, key_file: str = llm.KEY_FILE):
                                                   timeout_s=TIMEOUT_S), usage_log)
 
 
-def netcheck_preflight(out_dir: Path) -> int:
-    """Waits for the egress proxy to accept connections, then runs the network check, which writes
-    its report to ``out_dir/netcheck.json``; returns the check's exit status
-    (``asofbench_systems.run.netcheck_preflight`` with the reader's mounts and no services)."""
-    plumbing.wait_for_services((PROXY,), PROXY_WAIT_S, PROXY_RETRY_S)
+def netcheck_preflight(out_dir: Path,
+                       services: Sequence[tuple[str, int]] = SERVICES) -> int:
+    """Waits for the egress proxy and ``services`` to accept connections, then runs the network
+    check, which writes its report to ``out_dir/netcheck.json``; returns the check's exit status
+    (``asofbench_systems.run.netcheck_preflight`` with the reader's mounts and ``services``: none
+    for the reader, which runs none, and the sandbox for grep at D)."""
+    plumbing.wait_for_services((PROXY, *services), PROXY_WAIT_S, PROXY_RETRY_S)
     return plumbing.netcheck_preflight(out_dir, script=NETCHECK_SCRIPT, args=NETCHECK_ARGS,
-                                       services=SERVICES, mounts=MOUNTS, wait_s=0.0,
+                                       services=services, mounts=MOUNTS, wait_s=0.0,
                                        retry_s=PROXY_RETRY_S)
 
 
@@ -357,9 +364,16 @@ async def _run(requests: Path, out: Path, model: str, *, resume: bool, images: d
         return code
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="answer_requests", description="Answers a requests "
-                                     "file with the answering model, inside the run environment.",
+def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
+         ask: Callable[..., Awaitable[dict]] = answer.answer_once,
+         image_names: Sequence[str] = IMAGE_NAMES,
+         preflight: Callable[[Path], int] = netcheck_preflight,
+         self_test: Callable[[], int] | None = None) -> int:
+    """The command line of an answering run: the reader's own, or an entrant's that answers in the
+    reader image through this runner with an answering function (``ask``), images, a network
+    check and a self-test of its own, as grep at D's does (grep-at-d/agent.py)."""
+    parser = argparse.ArgumentParser(prog=prog, description="Answers a requests file with the "
+                                     "answering model, inside the run environment.",
                                      allow_abbrev=False)
     parser.add_argument("--requests", type=Path, help="the run's requests file")
     parser.add_argument("--out", type=Path, help="the responses file, in the run's output "
@@ -373,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         if args.requests or args.out or args.model or args.resume:
             parser.error("--self-test takes no other argument")
+        if self_test is not None:
+            return self_test()
         from reader import selftest
 
         return selftest.self_test()
@@ -380,16 +396,16 @@ def main(argv: list[str] | None = None) -> int:
                                             ("--model", args.model)) if value is None]:
         parser.error(f"the following arguments are required: {', '.join(missing)}")
     try:
-        images = parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"))
+        images = parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"), image_names)
         return asyncio.run(run(args.requests, args.out, args.model, resume=args.resume,
-                               images=images))
+                               images=images, ask=ask, preflight=preflight))
     except Refused as refusal:
-        print(f"answer_requests: {refusal}", file=sys.stderr)
+        print(f"{prog}: {refusal}", file=sys.stderr)
         return EXIT_STOPPED
     except SystemExit:
         raise
     except BaseException as error:  # noqa: BLE001 - a crash: recorded in run.json, exit 4
-        return crashed(error, llm.KEY_FILE, "answer_requests")
+        return crashed(error, llm.KEY_FILE, prog)
 
 
 if __name__ == "__main__":

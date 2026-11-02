@@ -6,6 +6,8 @@ answers, and turns the container's responses into answer rows.
         --out-dir <run dir> [--items <file>] [--runs 1,2,3]
     uv run python systems/harness.py requests --system long-context|oracle --data data/v0.1 \\
         --streams-dir streams --out-dir <run dir> [--items <file>] [--runs 1,2,3]
+    uv run python systems/harness.py requests --system grep-at-d --data data/v0.1 \\
+        --out-dir <run dir> [--items <file>] [--runs 1,2,3]
 
 reads the build's questions.jsonl, after checking it against the SHA-256 that the build's
 MANIFEST.json registers, and writes a new run directory, outside the repository:
@@ -29,6 +31,17 @@ MANIFEST.json registers, and writes a new run directory, outside the repository:
 requests.jsonl and keys.jsonl are written under temporary names and renamed only after plan.json
 is written, keys.jsonl first and requests.jsonl last, so that an interrupted invocation leaves no
 requests.jsonl for a container to answer.
+
+**Grep at D** reads its arm's tree as of the end of each item's date, which
+grep-at-d/run_dates.py builds for one date at a time, so its requests are written one file for
+each arm and date, ``input/<file>/requests.jsonl``, each in ascending key order and alone in its
+directory, with an empty ``output/<file>/`` for its run; ``<file>`` is the arm's stream's name and
+the date (``file_name``: ``h-minus-2021-09-03``). Beside them, ``dates.json`` maps each file to
+its ``arm`` and ``as_of`` and holds nothing of the items, and plan.json adds each file's number of
+requests and SHA-256 (``files``), and dates.json's SHA-256, with no single ``requests_sha256``.
+dates.json is written last, after every requests file has its name, so that run_dates.py, which
+reads it first, never runs a run directory that is not whole. Grep at D reads no stream here
+(run_dates.py materialises the trees from them).
 
 A system is asked the items of its entries as the scorer counts them (``asofbench.scoring.Scope``
 with no entries file, section 12): closed book, the oracle and grep at D every item in every arm
@@ -64,7 +77,9 @@ stream the harness refuses leaves nothing behind. A context begins with a descri
         --out <answers.jsonl>
 
 reads the run directory's plan.json and keys.jsonl and the container's run.json and responses in
-``output/`` (``asofbench_systems.answer.responses_by_key``), and writes, atomically, one answer
+``output/`` (``asofbench_systems.answer.responses_by_key``; for grep at D, in each date's
+``output/<file>/``, after checking dates.json and each date's requests file against plan.json and
+each response against its date's keys), and writes, atomically, one answer
 row per key, in keys.jsonl's order, with the nine fields of section 12 and no other: ``id``,
 ``system``, ``arm``, ``run``, ``answer``, ``tokens_in``, ``tokens_out``, ``wall_s`` and
 ``tool_calls``. The answer is shaped by the item's answer type and nothing else is done to it
@@ -73,8 +88,10 @@ has its row. A key with no response at all, which a run that stopped and was not
 gets a row with a null answer and null cost fields, which scores zero, and rows says how many and
 exits 1: after a stop with exit status 2 (or 4) resume the run first, and after one with exit
 status 3 (``api_error`` responses in a row) discard it and run it again in a fresh run directory,
-never resuming it. ``--system`` is the name the rows carry, the system that the requests were
-written for or an outside entry's name, such as a toy run's, that no registered system has.
+never resuming it; for grep at D, a date that has not run, or stopped, is resumed by running
+run_dates.py again, and a date that stopped with status 3 means that the whole run is discarded.
+``--system`` is the name the rows carry, the system that the requests were written for or an
+outside entry's name, such as a toy run's, that no registered system has.
 
 Exit status: 0 when the requests, or the rows, are written; 1 when rows wrote rows for keys with
 no response; 2, with the reason, when an input is refused (one that cannot be read among them),
@@ -128,7 +145,7 @@ from asofbench.manifest import ManifestError, registered_stream  # noqa: E402
 from asofbench.stream import STREAM_FILES  # noqa: E402
 
 INPUT, OUTPUT = "input", "output"
-REQUESTS, KEYS, PLAN = "requests.jsonl", "keys.jsonl", "plan.json"
+REQUESTS, KEYS, PLAN, DATES = "requests.jsonl", "keys.jsonl", "plan.json", "dates.json"
 QUESTIONS, MANIFEST = "questions.jsonl", "MANIFEST.json"
 KEY_FIELDS = ("key", "id", "arm", "run", "answer_type")
 # Section 12: the nine fields of an answer row, of which the last four are its costs.
@@ -465,8 +482,19 @@ def oracle_builder(planned: list[tuple[dict, str, int]],
 
 # The systems whose requests the harness writes, each with the function that builds, from the
 # planned items and the streams it reads (arm to path and SHA-256), the function that gives a
-# request its context; or None for a system that receives the question alone (closed book).
-CONTEXTS = {"closed-book": None, "long-context": long_context_builder, "oracle": oracle_builder}
+# request its context; or None for a system whose requests hold the question alone (closed book,
+# and grep at D, whose tree run_dates.py builds).
+CONTEXTS = {"closed-book": None, "grep-at-d": None, "long-context": long_context_builder,
+            "oracle": oracle_builder}
+# The systems whose requests are written one file for each arm and date.
+DATED = frozenset({"grep-at-d"})
+
+
+def file_name(arm: str, day: str) -> str:
+    """The name of grep at D's requests file for ``arm`` and ``day``, and of its input and output
+    directories: the arm's stream's name without its suffix, and the day (``h-minus-2021-09-03``).
+    """
+    return f"{STREAM_FILES[arm].removesuffix('.jsonl')}-{day}"
 
 
 def registered_streams(arms: Collection[str], streams_dir: Path, manifest: dict,
@@ -517,6 +545,10 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
         raise Refused(f"{out_dir} is not a new, empty directory: give each run a directory of "
                       "its own")
     builder = CONTEXTS[system]
+    dated = system in DATED
+    if dated and streams_dir is not None:
+        raise Refused(f"{system} reads no stream here: run_dates.py materialises each date's tree "
+                      "from the streams, so leave out --streams-dir")
     if builder is None and streams_dir is not None:
         raise Refused(f"{system} receives the question alone and reads no stream: leave out "
                       "--streams-dir")
@@ -536,8 +568,6 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
         streams = registered_streams({stream_arm(system, arm) for _, arm, _ in planned},
                                      streams_dir, manifest, data / MANIFEST)
         context_of = builder(planned, streams)
-    requests_path, keys_path = out_dir / INPUT / REQUESTS, out_dir / KEYS
-    pending_requests, pending_keys = temporary_path(requests_path), temporary_path(keys_path)
     (out_dir / INPUT).mkdir(parents=True)
     (out_dir / OUTPUT).mkdir()
     # A key for each planned request, in the items' order; none is ever the same twice.
@@ -549,60 +579,126 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
             key = str(uuid.uuid4())
         used.add(key)
         entries.append((key, q, arm, run))
+    # The requests files: the run's one (its name the empty one), or grep at D's, one for each arm
+    # and date, each in a directory of its own.
+    groups: dict[str, list[tuple[str, dict, str, int]]] = {}
+    for entry in entries:
+        _, q, arm, _ = entry
+        groups.setdefault(file_name(arm, q["as_of"]) if dated else "", []).append(entry)
+    names = sorted(groups)
+    paths = {name: out_dir / INPUT / name / REQUESTS for name in names}
+    pending = {name: temporary_path(path) for name, path in paths.items()}
+    keys_path = out_dir / KEYS
+    pending_keys = temporary_path(keys_path)
+    for name in names if dated else ():
+        (out_dir / INPUT / name).mkdir()
+        (out_dir / OUTPUT / name).mkdir()
     counts: dict[str, dict[str, dict[str, int]]] = {}
-    with open(pending_requests, "w", encoding="utf-8") as requests, \
-            open(pending_keys, "w", encoding="utf-8") as keys:
+    with open(pending_keys, "w", encoding="utf-8") as keys:
         for key, q, arm, run in entries:
             keys.write(json.dumps({"key": key, "id": q["id"], "arm": arm, "run": run,
                                    "answer_type": q["answer_type"]}) + "\n")
             by_run = counts.setdefault(arm, {}).setdefault(q["family"], {})
             by_run[str(run)] = by_run.get(str(run), 0) + 1
-        # The requests in ascending key order, which for random keys is a random permutation of
-        # the items' order: the reader answers a file in order, and stops after a run of
-        # api_error responses, so that one item's requests, which would fail together if its
-        # context were over the model's window, must not stand together.
-        for key, q, arm, _ in sorted(entries, key=lambda entry: entry[0]):
-            request = {"key": key, "question": q["question"]}
-            if context_of is not None:
-                request["context"] = context_of(q, arm)
-            requests.write(json.dumps(request, ensure_ascii=False) + "\n")
-        for handle in (requests, keys):
-            handle.flush()
-            os.fsync(handle.fileno())
-    write_json(out_dir / PLAN, {
-        "system": system, "runs": list(runs), "questions": questions_file,
-        "manifest": manifest_file, "items": items_file,
-        "streams": {arm: {"file": path.name, "sha256": digest}
-                    for arm, (path, digest) in streams.items()} or None,
-        "requests": len(planned), "counts": counts,
-        "requests_sha256": sha256_file(pending_requests),
-        "keys_sha256": sha256_file(pending_keys)})
-    # The keys first and the requests last: a run directory with a requests file is a whole one.
+        keys.flush()
+        os.fsync(keys.fileno())
+    for name in names:
+        with open(pending[name], "w", encoding="utf-8") as requests:
+            # The requests in ascending key order, which for random keys is a random permutation
+            # of the items' order: the reader answers a file in order, and stops after a run of
+            # api_error responses, so that one item's requests, which would fail together if its
+            # context were over the model's window, must not stand together.
+            for key, q, arm, _ in sorted(groups[name], key=lambda entry: entry[0]):
+                request = {"key": key, "question": q["question"]}
+                if context_of is not None:
+                    request["context"] = context_of(q, arm)
+                requests.write(json.dumps(request, ensure_ascii=False) + "\n")
+            requests.flush()
+            os.fsync(requests.fileno())
+    plan = {"system": system, "runs": list(runs), "questions": questions_file,
+            "manifest": manifest_file, "items": items_file,
+            "streams": {arm: {"file": path.name, "sha256": digest}
+                        for arm, (path, digest) in streams.items()} or None,
+            "requests": len(planned), "counts": counts,
+            "requests_sha256": None if dated else sha256_file(pending[""]),
+            "keys_sha256": sha256_file(pending_keys)}
+    dates_text = None
+    if dated:
+        dates_text = json.dumps({name: {"arm": groups[name][0][2],
+                                        "as_of": groups[name][0][1]["as_of"]}
+                                 for name in names}, indent=2) + "\n"
+        plan["files"] = {name: {"requests": len(groups[name]),
+                                "requests_sha256": sha256_file(pending[name])} for name in names}
+        plan["dates_sha256"] = hashlib.sha256(dates_text.encode("utf-8")).hexdigest()
+    write_json(out_dir / PLAN, plan)
+    # The keys first and the requests last: a run directory with a requests file is a whole one;
+    # for grep at D, dates.json, which run_dates.py reads first, comes after every requests file.
     os.replace(pending_keys, keys_path)
-    os.replace(pending_requests, requests_path)
-    print(f"harness.py requests: {len(planned)} requests for {system} "
-          f"({len({q['id'] for q, _, _ in planned})} items, runs "
-          f"{', '.join(map(str, runs))}) in {requests_path}; the container is given "
-          f"{out_dir / INPUT} read-only and {out_dir / OUTPUT}, and nothing else of the run "
-          "directory")
+    for name in names:
+        os.replace(pending[name], paths[name])
+    if dates_text is not None:
+        write_text_atomically(out_dir / DATES, dates_text)
+    described = (f"{len(planned)} requests for {system} "
+                 f"({len({q['id'] for q, _, _ in planned})} items, runs "
+                 f"{', '.join(map(str, runs))})")
+    if dated:
+        print(f"harness.py requests: {described} in {len(names)} files, one for each arm and "
+              f"date, under {out_dir / INPUT}, mapped to their arms and dates in "
+              f"{out_dir / DATES}; run_dates.py gives each date's run its input/<file>/ "
+              "read-only and its output/<file>/, and nothing else of the run directory")
+    else:
+        print(f"harness.py requests: {described} in {paths['']}; the container is given "
+              f"{out_dir / INPUT} read-only and {out_dir / OUTPUT}, and nothing else of the run "
+              "directory")
     return EXIT_DONE
 
 
-def read_responses(run_dir: Path, plan: dict, keys: set[str]) -> tuple[dict[str, dict], dict]:
-    """The container's responses, by key, and its run.json; Refused unless the container answered
-    this run's requests and every line is one key's response."""
-    record_path = run_dir / OUTPUT / RUN
+def read_responses(output: Path, requests_sha256: str | None, keys: set[str],
+                   where: str = OUTPUT) -> tuple[dict[str, dict], dict]:
+    """The responses of the container that wrote in ``output`` (the run directory's ``where``), by
+    key, and its run.json; Refused unless it answered the requests file whose SHA-256 is
+    ``requests_sha256`` and every line is the response to one of ``keys``."""
+    record_path = output / RUN
     if not record_path.is_file():
-        raise Refused(f"the system has not answered this run: {OUTPUT}/{RUN} is missing")
+        raise Refused(f"the system has not answered this run: {where}/{RUN} is missing")
     record = load_json(record_path)
-    if record.get("requests_sha256") != plan.get("requests_sha256"):
-        raise Refused(f"the responses in {OUTPUT}/ answer another requests file: its SHA-256 is "
-                      f"{record.get('requests_sha256')}, this run's {plan.get('requests_sha256')}")
+    if record.get("requests_sha256") != requests_sha256:
+        raise Refused(f"the responses in {where}/ answer another requests file: its SHA-256 is "
+                      f"{record.get('requests_sha256')}, this run's {requests_sha256}")
     name = record.get("responses")
     if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
-        raise Refused(f"{OUTPUT}/{RUN} names no responses file in {OUTPUT}/")
-    lines = read_input(read_jsonl, run_dir / OUTPUT / name)
-    return answer.responses_by_key(lines, keys, name), record
+        raise Refused(f"{where}/{RUN} names no responses file in {where}/")
+    lines = read_input(read_jsonl, output / name)
+    label = name if where == OUTPUT else f"{where}/{name}"
+    return answer.responses_by_key(lines, keys, label), record
+
+
+def read_dated_responses(run_dir: Path, plan: dict) -> tuple[dict[str, dict],
+                                                             dict[str, dict | None]]:
+    """Grep at D's responses, by key, gathered from each date's output directory, and each date's
+    run.json (None for a date that has not run); Refused unless dates.json and each date's
+    requests file are the ones that plan.json records, each date that has run answered its own
+    file, every line is the response to one of that file's keys, and some date has run."""
+    if read_input(sha256_file, run_dir / DATES) != plan.get("dates_sha256"):
+        raise Refused(f"{DATES} is not the one that {PLAN} records: its SHA-256 differs")
+    responses: dict[str, dict] = {}
+    records: dict[str, dict | None] = {}
+    for name, entry in plan["files"].items():
+        requests_path = run_dir / INPUT / name / REQUESTS
+        if read_input(sha256_file, requests_path) != entry["requests_sha256"]:
+            raise Refused(f"{INPUT}/{name}/{REQUESTS} is not the one that {PLAN} records: its "
+                          "SHA-256 differs")
+        if not (run_dir / OUTPUT / name / RUN).is_file():
+            records[name] = None
+            continue
+        keys = {request["key"] for request in read_input(read_jsonl, requests_path)}
+        found, records[name] = read_responses(run_dir / OUTPUT / name, entry["requests_sha256"],
+                                              keys, f"{OUTPUT}/{name}")
+        responses.update(found)
+    if all(record is None for record in records.values()):
+        raise Refused(f"the system has not answered this run: no date's {OUTPUT}/<file>/ holds a "
+                      f"{RUN}")
+    return responses, records
 
 
 def last_exit(record: dict) -> int | None:
@@ -628,7 +724,13 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
     if read_input(sha256_file, run_dir / KEYS) != plan.get("keys_sha256"):
         raise Refused(f"{KEYS} is not the one that {PLAN} records: its SHA-256 differs")
     keys = read_input(read_jsonl, run_dir / KEYS)
-    responses, record = read_responses(run_dir, plan, {key["key"] for key in keys})
+    dated = "files" in plan
+    if dated:
+        responses, records = read_dated_responses(run_dir, plan)
+    else:
+        responses, record = read_responses(run_dir / OUTPUT, plan.get("requests_sha256"),
+                                           {key["key"] for key in keys})
+        records = {"": record}
     rows, missing = [], 0
     for key in keys:
         row = {"id": key["id"], "system": system, "arm": key["arm"], "run": key["run"]}
@@ -642,11 +744,23 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
     write_text_atomically(out, "".join(json.dumps(row, ensure_ascii=False) + "\n"
                                        for row in rows))
     unanswered = sum(1 for response in responses.values() if response["error"])
+    models = sorted({str(record.get("model")) for record in records.values() if record})
     print(f"harness.py rows: {len(rows)} rows for {system} in {out}, answered by "
-          f"{record.get('model')}: {len(rows) - missing - unanswered} with an answer, "
+          f"{', '.join(models)}: {len(rows) - missing - unanswered} with an answer, "
           f"{unanswered} that the system could not answer, {missing} with no response")
+    stopped = [name for name, record in records.items()
+               if record is not None and last_exit(record) == EXIT_FAILURES]
     if missing:
-        if last_exit(record) == EXIT_FAILURES:
+        if dated and stopped:
+            next_step = (f"{', '.join(stopped)} stopped with exit status {EXIT_FAILURES} "
+                         "(api_error responses in a row, which point at a cause that every "
+                         "request shares): discard the run and run it again in a fresh run "
+                         "directory once the cause is fixed; never resume it (systems/README.md)")
+        elif dated:
+            next_step = ("a date has not run, or stopped before it answered them: run "
+                         "grep-at-d/run_dates.py again, which resumes it, then write the rows "
+                         "again")
+        elif stopped:
             # Each api_error response is its request's own and stays, but api_error responses in
             # a row point at a cause that every request shares: the run is discarded, never
             # resumed under changed settings.

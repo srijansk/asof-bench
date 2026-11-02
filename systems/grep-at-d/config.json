@@ -1,0 +1,255 @@
+{
+  "system": "grep-at-d",
+  "description": "Grep at D: the version-control baseline (PREREGISTRATION.md section 11), an agent that answers each item's question by reading its arm's tree as of the end of the item's date and the log beside it, the files at D and git-log.txt, without diffs or earlier versions, with read-only shell commands that run in a sandbox with no route out. systems/harness.py writes its requests, one file for each arm and date, and its answer rows; grep-at-d/run_dates.py builds each date's tree with asofbench materialize, runs that date's requests in grep at D's environment (grep-at-d/compose.yaml) and deletes the tree; the agent (grep-at-d/agent.py) answers in the reader image through the reader's runner, and its commands run in the sandbox (grep-at-d/sandbox); systems/README.md describes them.",
+  "inputs": "the question text, and in the sandbox its arm's tree as of the end of the item's date: the proposal files as they stood, rebuilt from that arm's episodes by asofbench materialize and named <repo>/<series>-<number>, and git-log.txt beside them, the log of the commits up to that date; nothing else from the repositories, so no header that the arm withholds, no index such as PEP 0 and nothing recorded after the date",
+  "entries": "every item in every arm that its arms field lists (section 12), each three times (runs 1, 2 and 3); in a pilot run, the items of a list such as data/v0.1/pilot.json (harness.py requests --items)",
+  "requests": {
+    "fields": [
+      "key",
+      "question"
+    ],
+    "key": "a random UUID4 for each item, arm and run, which says nothing of the item and is never the same twice",
+    "layout": "one requests file for each arm and date, input/<file>/requests.jsonl, <file> the arm's stream's name and the date (harness.file_name, such as h-minus-2021-09-03), each alone in its directory, with an empty output/<file>/ for its run; dates.json maps each file to its arm and as_of and holds nothing of the items; plan.json records each file's number of requests and SHA-256 and dates.json's SHA-256, and dates.json is written last, after every requests file has its name",
+    "order": "ascending key order within each file: the keys are random UUID4s, so each file is a random permutation of its items' order, and the requests of one item (its runs) are not next to one another; the reader answers a file in its order and stops after five api_error responses in a row, which must mean a cause that every request shares; keys.jsonl keeps the items' order",
+    "kept_on_the_host": "keys.jsonl, which maps each key to the item's id, arm, run and answer_type, plan.json and dates.json, beside the run directory's input/ and output/: a date's run is given that date's input/<file>/, which holds its requests.jsonl alone, read-only, and its output/<file>/; the reader refuses a requests file that is not alone in its directory",
+    "never_sent": "the item's id, family, stratum, answer_type, proposal, corpus, as_of and every other field, and every other file of data/v0.1; the date is never a field of a request, it chooses the tree that the sandbox holds"
+  },
+  "prompts": {
+    "system": "You answer one question about a repository of proposal files by reading it with read-only shell commands. The directory /repo holds the proposals' files as they stood at the end of the question's date, each named <repo>/<series>-<number> (the repository, peps, EIPs or ERCs; the series in lower case, pep, eip or erc; and the number, in four digits for a PEP), and git-log.txt, the log of the commits up to that date, newest first, with each commit's time, the files it touched and its message. Use the run tool to look. When you know the answer, reply with a JSON object whose \"answer\" field holds it in the form the question asks for.",
+    "user": "Question: {question}",
+    "tool": {
+      "name": "run",
+      "description": "Run a read-only shell command in /repo and return its output. Commands run under bash with a 20 second limit; output beyond 20,000 characters is cut.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "tool_choice": {
+      "type": "auto"
+    },
+    "cap_turn": "You have used all 40 commands. Reply now with your final answer as the JSON object.",
+    "tool_result": {
+      "text": "each command's result goes back as one tool result: its stdout as it came, then, when it has any, a line stderr: and its stderr, then a last line, exit code: N, or for a command that ran past the limit the timed-out line; each part ends with a line break before the next, and an output cut at 20,000 characters ends with its final line [cut: N characters omitted]",
+      "stderr_label": "stderr:",
+      "exit_line": "exit code: {exit_code}",
+      "timed_out_line": "the command ran past the 20 second limit and was killed",
+      "cut_line": "[cut: N characters omitted]",
+      "not_run": "Not run: the run tool takes one field, \"command\", a shell command of at most 65,536 bytes.",
+      "not_run_when": "a call of another tool than run, or whose input is not one field, command, a string of at most 65,536 bytes in UTF-8 with no NUL character: it is not run, and its result is this text, marked is_error",
+      "past_the_cap": "a call of the cap's turn past the 40th is not run, and its result is the cap's turn, marked is_error"
+    },
+    "model_facing": "the system prompt, the user message's text around the question, the tool's name, description and input schema, the labels and lines of the tool results, the not-run result and the cap's user turn are the only text that the model receives besides the question and the commands' output, and hold no benchmark-derived value: no item id, gold value, family name or stratum; the commands' output is the tree's and the log's own text"
+  },
+  "answering": {
+    "call": "grep-at-d/agent.py answer_with_commands: one messages.create call for each turn, without streaming, with the keyword arguments of asofbench_systems.answer.answering_settings with grep at D's system prompt, and the run tool with tool_choice auto (agent.settings), the same on every turn",
+    "model": "claude-haiku-5-5",
+    "sensitivity_check_model": "claude-sonnet-5-5, on the pilot items, scored in its own run",
+    "max_tokens": 32000,
+    "thinking": {
+      "type": "adaptive"
+    },
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "answer"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "tools": "the run tool (prompts.tool), which the agent runs in the sandbox, and no other",
+    "tool_choice": "auto, so that the model thinks before it calls the tool (a forced tool_choice turns thinking off on these models)",
+    "not_sent": "no temperature, top_p or top_k, so the temperature is the default; no prefill (each turn's messages end with a user turn); no other tool, no server tool, no strict mode and no beta header",
+    "scorer_settings": "effort medium, adaptive thinking, default temperature",
+    "prompt_caching": {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "placement": "each request marks its last block, and no other, with this marker: the last block of its last user turn, which is the question on the first turn and then the last tool result or the cap's turn; each turn reads the prefix that the one before it wrote. A block's marker is the multi-turn pattern for anthropic 0.78.0, whose messages.create takes markers on blocks and has no top-level cache_control",
+      "ttl": "5 minutes, the default: each turn follows the one before it within seconds",
+      "effect": "a marker that moves is no edit of the history, so thinking blocks stay valid; caching changes no output and no setting, and tokens_in counts the tokens written to and read from the cache with the rest of the input"
+    },
+    "anthropic_client": "asofbench_systems.llm.make_async_client: anthropic.AsyncAnthropic with base_url https://api.anthropic.com given in code (ANTHROPIC_BASE_URL is never read), the key read from the Docker secret /run/secrets/anthropic_api_key only, the SDK's own httpx client honouring HTTPS_PROXY, max_retries 8, timeout 600 s",
+    "base_url": "https://api.anthropic.com",
+    "sdk": "anthropic 0.78.0, which sends anthropic-version 2023-06-01: the lowest release whose messages.create takes output_config's effort, the json_schema output format and adaptive thinking (0.77.1 has the format only), as reader/requirements.in records",
+    "usage_log": "asofbench_systems.usage.instrument wraps client.messages.create and records every turn's call in usage.jsonl under the request's key, the invocation and attempt 1, each line with the model the call asked for and the model id the response named, which can be a dated snapshot of it"
+  },
+  "transcript": {
+    "first_turn": "the question, Question: {question}, as a user turn of one text block",
+    "append_only": "each reply goes back as the API sent it, block for block (thinking and redacted thinking blocks unmodified, text and tool calls), followed by one user turn with a tool result for each of its tool calls, in their order; nothing earlier is ever edited or removed",
+    "commands": "a turn's commands run one after another in the sandbox, in their order"
+  },
+  "limits": {
+    "max_tool_calls": 40,
+    "cap": "after the 40th result the user turn ends with the cap's turn, a text block after the tool results; a call of that turn past the 40th is not run; a tool call after the cap's turn ends the answer with a null answer and the error command_cap, the request's own outcome and never an api_error; a call that is not run counts toward the cap, so that every answer ends",
+    "command_timeout_s": 20,
+    "output_characters": 20000,
+    "command_bytes": 65536,
+    "max_tokens_per_turn": 32000
+  },
+  "reply": {
+    "answer": "the answer field of the JSON object that the text blocks of the reply that calls no tool hold, as it came (the harness shapes it); thinking blocks before it are passed over",
+    "tokens_in": "every turn's input_tokens, cache_creation_input_tokens and cache_read_input_tokens, summed (a call that raised counts 0)",
+    "tokens_out": "every turn's output_tokens, summed",
+    "wall_s": "the answer's wall time in seconds, every turn and command included, with the SDK's retries and the waits for the sandbox",
+    "tool_calls": "the number of commands run in the sandbox, at most 40; a call that was not run is not counted",
+    "thinking_blocks": "the thinking blocks of every turn's response, summed: adaptive thinking lets the model answer without thinking, so this records what it did",
+    "not_answered": {
+      "refusal": "a response with stop_reason refusal on any turn, whatever it holds",
+      "max_tokens": "a response with stop_reason max_tokens on any turn, whatever it holds",
+      "unparseable": "a reply that calls no tool and whose text is not one JSON object with an answer field",
+      "api_error": "an API error, after the SDK's retries, that is the request's own, such as a 400, 404, 413 or 422, on any turn",
+      "command_cap": "a tool call after the cap's turn"
+    },
+    "null_answer": "a request that was not answered has a response with a null answer and its error code, and its row has a null answer, which scores zero (section 12)"
+  },
+  "shaping": "the harness shapes each answer by the item's answer_type and does nothing else to it: for status, a string is kept, an integer becomes its decimal string, and anything else is kept as it came; for set, a list is kept, a string that parses as a JSON list is replaced by that list, and anything else is kept as it came; for count, an integer is kept, a string of ASCII digits with an optional leading minus sign is replaced by its integer, and anything else is kept as it came. A boolean is no integer. The scorer normalises the rest",
+  "rows": "harness.py rows writes one row per request, in keys.jsonl's order, with exactly the nine fields of section 12, gathering the responses of every date's output/<file>/ after checking dates.json and each date's requests file against plan.json and each response against its date's keys; a key with no response, which a date that has not run or stopped leaves, gets a null answer and null costs, and rows exits 1",
+  "run": {
+    "runner": "the reader's runner, reader/answer_requests.py, with grep at D's answering function, images and network check (grep_at_d, agent.main): its concurrency, its resume by key, its usage log, its lock, run.json and its stops hold as for the single-call entrants",
+    "concurrency": 8,
+    "max_retries": 8,
+    "timeout_s": 600.0,
+    "max_consecutive_api_errors": 5,
+    "order": "the requests file's order, read one line at a time, with 8 calls under way at once",
+    "infrastructure": "an infrastructure error stops the run with exit status 2 and writes no response for its request, so that a resumed run answers it: after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, InternalServerError, AuthenticationError or PermissionDeniedError, the classes that anthropic 0.78.0's client raises for these: InternalServerError for every 5xx, 503, 504 and 529 included, since that client has no branch of its own for 529; the shared table also names OverloadedError, which that client never raises), or the standard library's ConnectionError; the requests under way finish and keep their responses, and no other starts; and a sandbox that cannot be reached, does not answer within 300 s or answers anything but a command's result (SandboxUnavailable, a ConnectionError), which stops the run in the same way: a failure of the environment never gives a request a null answer",
+    "consecutive_api_errors": "5 api_error responses in a row, in the order they are written, stop the run with exit status 3: each is its request's own error and stays, but so many in a row point at a cause that every request shares, such as a setting that the API rejects, which would give one to every request left; the requests under way finish and keep their responses, and no other starts. A resume answers only the requests that have no response, so a run that stopped this way for a cause of the run is discarded and run again in a new run directory once the cause is fixed, never resumed under changed settings; a resumed run counts on from the api_error responses at the end of the responses file",
+    "resume": "answer_requests --resume answers every request that has no response, after checking that the requests file, the responses file and the model are those that the run began with",
+    "lock": "every invocation holds the output directory's lock, run.lock, created with O_EXCL and touched every 30 s, and removes it at its end; a second invocation on the directory stops at once with exit status 2",
+    "exit_status": "0 when every request has a response with an answer; 1 when every request has a response and some of them have an error code; 2 when it is refused before it starts, the network check fails or an infrastructure error stops it; 3 when 5 api_error responses in a row stop it; 4 when it crashes, which run.json records with the exception's class",
+    "dates": "grep-at-d/run_dates.py, on the host, runs one environment for each arm and date in dates.json's order: it builds the date's tree with asofbench materialize --arm --data from the arm's registered stream into a fresh directory outside the repository, runs the agent with that date's input/<file>/, output/<file>/ and tree, saves the proxy's log beside the responses, takes the environment down and deletes the tree whatever the run did; a date that is done is skipped, one that stopped with exit status 2 or 4 or was killed is resumed, and one that stopped with exit status 3 stops it, since its run is discarded and never resumed; it checks dates.json, each requests file and the build's MANIFEST.json against plan.json first"
+  },
+  "sandbox": {
+    "image": "asofbench/sandbox, built from grep-at-d/sandbox/Dockerfile with that directory as the context; its build ends with the command server's self-test, run with no network",
+    "base_image": "debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04",
+    "debian_snapshot": "20261027T000000Z",
+    "packages": "bash, coreutils, grep, findutils and sed from the base image, Debian's essential packages, and gawk and python3, for the command server, with their dependencies from http://snapshot.debian.org/archive/debian/20261027T000000Z (trixie and trixie-updates) and http://snapshot.debian.org/archive/debian-security/20261027T000000Z (trixie-security), the archive as it stood when the base image was built, and from no other source; the build log lists each package's version",
+    "user": "uid 10001, not root",
+    "root_filesystem": "read-only (read_only: true)",
+    "repo": "the date's tree, a read-only bind mount at /repo of the fresh directory that asofbench materialize wrote, which holds the proposal files and git-log.txt and nothing else",
+    "tmpfs_bytes": 16777216,
+    "tmp": "a tmpfs of 16 MiB at /tmp, the commands' HOME and TMPDIR, emptied before each command",
+    "pids_limit": 256,
+    "memory": "512m",
+    "hardening": "no capability (cap_drop ALL), no-new-privileges, a private IPC namespace with no /dev/shm (ipc none), an init process that reaps what a command leaves (init: true), no secret, no environment from the host and no published port",
+    "network": "sandbox_net alone, an internal network with no address of the host on it, which only the agent's container shares: no route out, no proxy",
+    "port": 7000,
+    "api": "POST /run with a JSON body {\"command\": str}, answered with {\"exit_code\", \"stdout\", \"stderr\", \"truncated\", \"timed_out\"}; every other request is refused and runs nothing (grep-at-d/sandbox/command_server.py)",
+    "commands": "each runs as bash -c in /repo, in a session and process group of its own, with stdin from /dev/null and an environment of PATH, LANG and LC_ALL (C.UTF-8), HOME and TMPDIR alone; it ends when bash exits or at 20 s, and then its whole process group is killed, background jobs included; stdout and stderr are each kept up to 20,000 characters, read as UTF-8 with each byte that is not replaced, and end with a final line [cut: N characters omitted] when cut",
+    "one_at_a_time": "commands run one at a time, so that the requests of a date, whose agents share the sandbox, never see one another's processes or scratch files; a command waits for those before it, and its answer's wall_s includes the wait",
+    "client_timeout_s": 300.0,
+    "stated_limits": "a process that a command moves into a session of its own (setsid) leaves the process group that is killed, and lives until the date's environment is taken down; the commands run as the server's user, so one could stop the server, which stops the run with exit status 2"
+  },
+  "network_policy": {
+    "routes_out": [
+      {
+        "host": "api.anthropic.com",
+        "port": 443,
+        "through": "the egress proxy (env/egress, asofbench/egress) on the internal network, which opens a CONNECT tunnel to that host and port only and refuses everything else",
+        "for": "the answering model, claude-haiku-5-5, or claude-sonnet-5-5 in the sensitivity check, on every turn of the agent's answers"
+      }
+    ],
+    "proxy": {
+      "allow": "api.anthropic.com:443 (EGRESS_ALLOW in grep-at-d/compose.yaml)",
+      "idle_timeout_s": 660,
+      "idle_timeout": "EGRESS_IDLE_TIMEOUT in grep-at-d/compose.yaml: the proxy closes a tunnel that neither side has used for 660 s, a minute longer than the client's 600 s request timeout, since a non-streaming request receives nothing until its response begins; a request therefore ends at the client's timeout, never cut short by the proxy",
+      "limits": "the proxy's stated limits: it relays TLS uninspected, so it checks the host and port of the CONNECT request and never the server name (SNI) that the TLS handshake sends inside a tunnel to api.anthropic.com:443, which is therefore not checked against the CONNECT host; and it has no cap on concurrent connections",
+      "log": "one JSON line per request (ts, client, method, target, allowed, reason) and nothing of what passes through a tunnel; run_dates.py saves it beside each date's responses, as egress.log (egress-<n>.log for a later attempt)"
+    },
+    "services_inside": [
+      {
+        "name": "sandbox",
+        "host": "sandbox",
+        "port": 7000,
+        "routes_out": "none",
+        "what": "the command server (grep-at-d/sandbox), which runs the agent's read-only shell commands",
+        "holds": "the date's tree and git-log.txt, read-only, its own software and a scratch directory emptied before each command; nothing else of the host",
+        "network": "sandbox_net alone, which only the agent's container shares; it reaches neither the proxy nor anything beyond the agent's container"
+      }
+    ],
+    "container": "the agent's container, in the reader image, is on inner, with the egress proxy, and on sandbox_net, with the sandbox, and sees its runner, the agent, the shared package, the date's requests (input/<file>/, read-only at /input), its output directory (/output) and the API key as a Docker secret; the sandbox's container sees the date's tree, read-only at /repo, and nothing else of the host",
+    "unreachable": "data/v0.1, every file of this repository other than the reader's runner, the agent, the shared package, the network check and the command server, the harness's keys.jsonl, plan.json and dates.json, the streams, every other date's tree, the corpus clones, and the corpora's live sources (github.com/python/peps, github.com/ethereum/EIPs, github.com/ethereum/ERCs, peps.python.org, eips.ethereum.org and ercs.ethereum.org), their mirrors or a clone of them",
+    "provider_side_tools": "none: every turn carries the one client-side tool, run, which the agent runs in the sandbox, and no server tool (web search, web fetch, code execution, file search or any other)",
+    "checked_by": "env/netcheck.py, run by grep_at_d before anything is answered, with the flags that every system gives it (asofbench_systems.run.NETCHECK_ARGS), the sandbox (sandbox:7000) as its one service, which must resolve and accept a connection, and the mounts /input, /output and /run/secrets; it aborts the run on any failure, and its report is netcheck.json in the date's output directory; the sandbox's own isolation is checked by hand inside its container (systems/README.md)"
+  },
+  "installed": {
+    "reader": {
+      "python": "3.12.16",
+      "base_image": "python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159",
+      "lock": "reader/requirements.txt, compiled from reader/requirements.in with hashes by uv 0.7.2; the image installs it hash-checked, from wheels only, and its build's self-test checks the installed packages against it",
+      "python_packages": {
+        "annotated-types": "0.8.0",
+        "anthropic": "0.78.0",
+        "anyio": "4.15.1",
+        "certifi": "2026.10.23",
+        "distro": "1.9.0",
+        "docstring-parser": "0.18.0",
+        "h11": "0.16.0",
+        "httpcore": "1.0.9",
+        "httpx": "0.28.1",
+        "idna": "3.20",
+        "iniconfig": "2.3.1",
+        "jiter": "0.18.0",
+        "packaging": "26.3",
+        "pluggy": "1.7.0",
+        "pydantic": "2.14.2",
+        "pydantic-core": "2.50.2",
+        "pygments": "2.21.0",
+        "pytest": "9.0.3",
+        "sniffio": "1.3.1",
+        "typing-extensions": "4.16.0",
+        "typing-inspection": "0.4.4"
+      },
+      "images": {
+        "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/selftest.py), run with no network",
+        "asofbench/egress": "built from env/egress, on the base image above",
+        "per_run": "each run records the IDs of the two images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
+      }
+    },
+    "sandbox": {
+      "base_image": "debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04",
+      "debian_snapshot": "20261027T000000Z",
+      "packages": "gawk and python3 and their dependencies, from the snapshot (sandbox.packages)",
+      "image": "asofbench/sandbox, built from grep-at-d/sandbox/Dockerfile"
+    },
+    "per_run": "each date's run records the IDs of the three images it ran with, the reader's, the proxy's and the sandbox's, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
+  }
+}

@@ -1,12 +1,13 @@
-"""How the reader is put together: its Dockerfile's list of the reader's and the shared package's
-files against the ones that its runner and its self-test import, and the rest of the image as
-Graphiti's is built; the self-test's check of the installation against a lock; its
-compose file (the egress service as Graphiti's, the reader on the internal network only, its two
-mounts and the key as a Docker secret); its network check (the shared flags, no services, its
-mounts, after the proxy accepts connections); its lock; the config.json of each single-call
-entrant (closed book, long context and the oracle) against the code it records; that no module
-outside the tests is one that pytest collects; and the CI step that runs the answering tests with
-the SDK that the lock pins. Standard library only, with packaging, which pytest installs."""
+"""How the reader is put together: its Dockerfile's list of the reader's, grep at D's agent's and
+the shared package's files against the ones that its two entry points import (the runner, with
+its self-test, and grep at D's agent), and the rest of the image as Graphiti's is built; the
+self-test's check of the installation against a lock; its compose file (the egress service as
+Graphiti's, the reader on the internal network only, its two mounts and the key as a Docker
+secret); its network check (the shared flags, no services, its mounts, after the proxy accepts
+connections); its lock; the config.json of each single-call entrant (closed book, long context
+and the oracle) against the code it records; that no module outside the tests is one that pytest
+collects; and the CI step that runs the answering tests with the SDK that the lock pins. Standard
+library only, with packaging, which pytest installs."""
 
 from __future__ import annotations
 
@@ -23,8 +24,10 @@ import pytest
 from asofbench_systems import answer, llm
 from asofbench_systems import run as plumbing
 from image_files import (
+    block,
     copied_python_files,
     copied_shared_files,
+    items,
     shared_file_differences,
     shared_files_needed,
 )
@@ -33,6 +36,7 @@ from reader import selftest
 
 SYSTEMS = Path(__file__).resolve().parents[1]
 READER = SYSTEMS / "reader"
+GREP_AT_D = SYSTEMS / "grep-at-d"
 PACKAGE = SYSTEMS / "common" / "asofbench_systems"
 ENTRANTS = ("closed-book", "long-context", "oracle")
 PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)[ \t]*(;[^\\\n]*)?", re.M)
@@ -43,26 +47,6 @@ def lock_pins(marked: bool = False) -> dict[str, str]:
     text = (READER / "requirements.txt").read_text(encoding="utf-8")
     return {name: version for name, version, marker in PIN.findall(text)
             if marked or not marker.strip()}
-
-
-def block(text: str, name: str, indent: int) -> list[str]:
-    """The lines of the YAML key ``name`` at ``indent`` spaces, from its line to the next line that
-    is indented as little, blank lines at its end left out."""
-    lines = text.splitlines()
-    start = lines.index(" " * indent + f"{name}:")
-    end = next((n for n in range(start + 1, len(lines))
-                if lines[n].strip() and len(lines[n]) - len(lines[n].lstrip()) <= indent),
-               len(lines))
-    found = lines[start:end]
-    while found and not found[-1].strip():
-        found.pop()
-    return found
-
-
-def items(lines: list[str], key: str) -> list[str]:
-    """The list items under ``key`` in a service's lines."""
-    found = block("\n".join(lines), key, 4)[1:]
-    return [line.strip()[2:] for line in found if line.strip().startswith("- ")]
 
 
 def reader_files_needed(entry: Path) -> set[str]:
@@ -87,13 +71,21 @@ def reader_files_needed(entry: Path) -> set[str]:
     return needed
 
 
-def test_the_image_copies_the_files_that_the_runner_and_its_self_test_import_and_no_others():
+def test_the_image_copies_the_files_that_its_entry_points_import_and_no_others():
     own = reader_files_needed(READER / "answer_requests.py")
-    # The runner imports its self-test (for --self-test), which imports the runner back.
+    # The runner imports its self-test (for --self-test), which imports the runner back; grep at
+    # D's agent imports the runner, which answers its requests.
     assert own == {"answer_requests.py", "selftest.py"}
+    assert reader_files_needed(GREP_AT_D / "agent.py") == {"agent.py", *own}
     dockerfile = (READER / "Dockerfile").read_text(encoding="utf-8")
     assert copied_python_files(dockerfile, "reader") == own
-    needed = shared_files_needed([READER / name for name in sorted(own)], PACKAGE)
+    assert copied_python_files(dockerfile, "grep-at-d") == {"agent.py"}
+    assert "COPY grep-at-d/agent.py /app/grep_at_d/agent.py\n" in dockerfile
+    # Nothing of the sandbox's: its server runs in an image of its own.
+    assert "sandbox" not in "".join(line for line in dockerfile.splitlines()
+                                    if line.startswith("COPY"))
+    needed = shared_files_needed([*(READER / name for name in sorted(own)),
+                                  GREP_AT_D / "agent.py"], PACKAGE)
     # The files that the runner cannot do without, so that an empty result is no pass.
     assert {"__init__.py", "answer.py", "llm.py", "run.py", "usage.py"} <= needed
     assert "stream.py" not in needed
@@ -155,6 +147,10 @@ def test_the_image_is_built_as_graphiti_s_is():
     assert dockerfile.index("\nUSER 10001:10001\n") < dockerfile.index(
         "\nRUN --network=none answer_requests --self-test\n")
     assert 'exec python -m reader.answer_requests "$@"' in dockerfile
+    # Grep at D's agent, as the command that its runs use, with a self-test of its own.
+    assert 'exec python -m grep_at_d.agent "$@"' in dockerfile
+    assert dockerfile.index("\nRUN --network=none answer_requests --self-test\n") < (
+        dockerfile.index("\nRUN --network=none grep_at_d --self-test\n"))
     # The paths the self-test finds the lock and the network check at, in the image's layout.
     assert selftest.REQUIREMENTS == READER.parent / "requirements.txt"
     assert reader.NETCHECK_SCRIPT == SYSTEMS / "env" / "netcheck.py"
@@ -308,5 +304,6 @@ def test_ci_runs_the_answering_tests_with_the_sdk_and_httpx_that_the_lock_pins()
         pytest.skip("the repository's workflows are not beside systems/ here")
     pins = lock_pins()
     step = (f"--extra dev --with anthropic=={pins['anthropic']} --with httpx=={pins['httpx']} "
-            "python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py")
+            "python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py "
+            "systems/tests/test_grep_agent.py")
     assert step in workflow.read_text(encoding="utf-8")

@@ -3,7 +3,8 @@ for the tests that guard each image's list of the shared package's files (test_g
 and test_reader_wiring.py). An image copies the shared package's files one by one, so a file that
 its entry point imports and its Dockerfile lacks fails only when the container first runs that
 entry point, and the tests that run inside the image read the files they are given, not the
-image's own. Standard library only; pytest collects no test here."""
+image's own. Also the blocks of a compose file, as the wiring tests read them (``block`` and
+``items``). Standard library only; pytest collects no test here."""
 
 from __future__ import annotations
 
@@ -82,3 +83,23 @@ def shared_file_differences(dockerfile: str, needed: set[str]) -> tuple[set[str]
     not needed."""
     copied = copied_shared_files(dockerfile)
     return needed - copied, copied - needed
+
+
+def block(text: str, name: str, indent: int) -> list[str]:
+    """The lines of the YAML key ``name`` at ``indent`` spaces, from its line to the next line that
+    is indented as little, blank lines at its end left out."""
+    lines = text.splitlines()
+    start = lines.index(" " * indent + f"{name}:")
+    end = next((n for n in range(start + 1, len(lines))
+                if lines[n].strip() and len(lines[n]) - len(lines[n].lstrip()) <= indent),
+               len(lines))
+    found = lines[start:end]
+    while found and not found[-1].strip():
+        found.pop()
+    return found
+
+
+def items(lines: list[str], key: str) -> list[str]:
+    """The list items under ``key`` in a service's lines."""
+    found = block("\n".join(lines), key, 4)[1:]
+    return [line.strip()[2:] for line in found if line.strip().startswith("- ")]

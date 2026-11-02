@@ -15,8 +15,9 @@ model alike (PREREGISTRATION.md section 11).
   times, and gives each request ``timeout_s`` seconds.
 
 The key is never printed, logged or put in an error message: ``read_key`` refuses a file that
-does not hold one line of printable ASCII without saying what it holds, and ``redact`` takes the
-key out of any text an adapter writes, such as an exception's message.
+cannot be read, or does not hold one line of printable ASCII, with a ``KeyFileError`` that names
+the file and why and never what it holds, and ``redact`` takes the key out of any text an adapter
+writes, such as an exception's message.
 
 ``anthropic`` is imported only inside the functions that need it, so the module imports where the
 SDK is not installed.
@@ -34,17 +35,27 @@ _KEY = re.compile(r"[\x21-\x7e]+")
 REDACTED = "[redacted]"
 
 
+class KeyFileError(ValueError):
+    """The key file cannot be read, or does not hold one key: the message names the file and why,
+    and never what the file holds."""
+
+
 def read_key(key_file: str = KEY_FILE) -> str:
-    """The API key that ``key_file`` holds, without the line break after it. ValueError, which
-    never quotes the file, unless the file holds exactly one line of printable ASCII."""
-    raw = Path(key_file).read_bytes()
+    """The API key that ``key_file`` holds, without the line break after it. KeyFileError when the
+    file cannot be read (missing, a directory, or not readable by the user that reads it) or does
+    not hold exactly one line of printable ASCII."""
+    try:
+        raw = Path(key_file).read_bytes()
+    except OSError as error:
+        raise KeyFileError(f"{key_file} cannot be read "
+                           f"({error.strerror or type(error).__name__})") from None
     try:
         key = raw.decode("ascii").strip()
     except UnicodeDecodeError:
         key = ""
     if not _KEY.fullmatch(key):
-        raise ValueError(f"{key_file} does not hold an API key (one line of printable ASCII "
-                         "with no space)")
+        raise KeyFileError(f"{key_file} does not hold an API key (one line of printable ASCII "
+                           "with no space)")
     return key
 
 

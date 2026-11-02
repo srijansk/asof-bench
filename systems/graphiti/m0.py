@@ -15,19 +15,24 @@ episodes hold proposal text, so ``<dir>`` must be outside the checkout.
         --prepare <dir>/prepare.json --manifest data/v0.1/MANIFEST.json \\
         --questions data/v0.1/questions.jsonl --streams-dir streams --out projection.json
 
-checks that the summary is the finished run of claude-haiku-5-5 over the prepared input (its
-stream's SHA-256 is prepare.json's ``input_sha256``; its last invocation exited with status 0 or
-1 and its log covers every episode; no call raised inside an attempt that ingested its episode,
-where Graphiti caught the failure and carried on, and every call that raised has its attempt;
-the calls that raised inside attempts that failed or stopped, which caused the failure or the
-stop, are reported, not refused) and that prepare.json, questions.jsonl and the three local
-streams are the registered ones, then applies section 13's projection and writes it, step by
-step, to ``projection.json``:
+checks that the summary is the finished run, every call of which asked for claude-haiku-5-5,
+over the prepared input (its stream's SHA-256 is prepare.json's ``input_sha256``; its last
+invocation exited with status 0 or 1 and its log covers every episode; its ingestion attempts'
+totals are split by the outcome of their attempt, and add up; no call raised inside an attempt
+that ingested its episode, where Graphiti caught the failure and carried on, and no usage line
+falls in an attempt that the log cannot place; no call that raised is attributed to no episode
+and no removal; the calls that raised inside attempts that failed or stopped, which caused the
+failure or the stop, are reported, not refused, and so are the model ids that the responses
+named, which can be dated snapshots of the model asked for) and that prepare.json,
+questions.jsonl and the three local streams are the registered ones, then applies section 13's
+projection and writes it, step by step, to ``projection.json``:
 
 1. the rates, ``in_per_char = input_tokens / text_chars`` and ``out_per_char = output_tokens /
-   text_chars``, with the tokens of the run's ingestion attempts from its summary.json (every
-   attempt counted, the calls that removed episodes not; input tokens include the
-   cache-creation and cache-read tokens) and the characters from prepare.json;
+   text_chars``, with the tokens of the run's ingestion attempts that ingested their episode or
+   failed (COUNTED, from summary.json's ``by_outcome``; input tokens include the cache-creation
+   and cache-read tokens) and the characters from prepare.json. The tokens of the attempts that
+   stopped, whose work the environment's failure discarded and a resumed invocation did again,
+   are reported apart and not counted, and neither are the calls that removed episodes;
 2. the ingestions that Graphiti's entries need, the H+, H- and CF streams and section 14's
    incremental path, whose characters are the H+ stream's again, each with its stream's
    characters from the manifest; its projected tokens, the rates times those characters; and its
@@ -74,9 +79,14 @@ NO_K = ("the named proposals alone are projected beyond the budget, so no k fits
         "registration does not provide for this case")
 # The exit statuses of an ingestion that reached the stream's end (graphiti/ingest.py).
 FINISHED = (0, 1)
-# The outcomes of the attempt a call that raised fell in, as summary.json's
-# api_errors_by_outcome splits them (graphiti/ingest.py ATTEMPT_OUTCOMES).
+# The outcomes of the attempt a usage line fell in, by which summary.json's by_outcome splits the
+# ingestion attempts' totals (graphiti/ingest.py ATTEMPT_OUTCOMES), and the totals of each.
 ATTEMPT_OUTCOMES = ("ingested", "failed", "stopped", "unknown")
+TOTALS = ("input_tokens", "output_tokens", "calls", "api_errors")
+# The outcomes whose attempts' tokens the rates count: an attempt that ingested its episode, and
+# one that failed, which Graphiti spends on the episode all the same. A stopped attempt's work was
+# discarded by the environment's failure and done again by a resumed invocation.
+COUNTED = ("ingested", "failed")
 
 
 class Refused(Exception):
@@ -209,6 +219,13 @@ def candidate_key(candidate: str) -> str:
     return hashlib.sha256(f"{SEED}|distractor|{candidate}".encode()).hexdigest()
 
 
+def is_totals(value) -> bool:
+    """Whether ``value`` is the four totals that summary.json gives a set of calls (TOTALS),
+    each a count."""
+    return (isinstance(value, dict) and set(value) == set(TOTALS)
+            and all(type(count) is int and count >= 0 for count in value.values()))
+
+
 def priced(chars: dict[str, int], rates: tuple[Fraction, Fraction],
            prices: tuple[Fraction, Fraction]) -> tuple[list[dict], dict, Fraction]:
     """Each ingestion's characters, projected tokens and cost, given each stream's characters;
@@ -234,10 +251,12 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
             streams_dir: Path, command: list[str]) -> dict:
     summary, prepared = load_json(summary_path), load_json(prepare_path)
     manifest = load_json(manifest_path)
+    # The model that the calls asked for, which every usage line records; the responses may name
+    # a dated snapshot of it, which is reported below and not required to match.
     if summary.get("model") != MODEL or summary.get("arm") != "H+":
-        raise Refused(f"{name_of(summary_path)} is not an H+ run whose every call {MODEL} "
-                      f"answered: its arm is {summary.get('arm')!r} and its model "
-                      f"{summary.get('model')!r}")
+        raise Refused(f"{name_of(summary_path)} is not an H+ run whose every call asked for "
+                      f"{MODEL}: its arm is {summary.get('arm')!r} and the model its calls asked "
+                      f"for {summary.get('model')!r}")
     if prepared.get("stream_sha256") != registered(manifest, "streams", "H+"):
         raise Refused(f"{name_of(prepare_path)} was not prepared from the registered H+ stream: "
                       f"its stream_sha256 is {prepared.get('stream_sha256')}, the manifest's "
@@ -261,25 +280,35 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
     if logged != summary.get("episodes"):
         raise Refused(f"{name_of(summary_path)} is not a finished run: its log covers {logged} "
                       f"of its {summary.get('episodes')} episodes")
-    # A call that raised inside an attempt that failed or stopped is the cause of that failure or
-    # stop, which the log and run.json record; one inside an attempt that ingested its episode is
-    # a failure that Graphiti caught and carried on from.
-    split = summary.get("api_errors_by_outcome")
+    # The ingestion attempts' totals by the outcome of their attempt, which add up to them. A call
+    # that raised inside an attempt that failed or stopped is the cause of that failure or stop,
+    # which the log and run.json record; one inside an attempt that ingested its episode is a
+    # failure that Graphiti caught and carried on from.
+    split = summary.get("by_outcome")
     if (not isinstance(split, dict) or set(split) != set(ATTEMPT_OUTCOMES)
-            or any(type(count) is not int or count < 0 for count in split.values())
-            or sum(split.values()) != summary.get("api_errors")):
-        raise Refused(f"{name_of(summary_path)} does not split its calls that raised "
-                      f"(api_errors: {summary.get('api_errors')!r}) by the outcome of the attempt "
-                      f"they fell in (api_errors_by_outcome: {', '.join(ATTEMPT_OUTCOMES)})")
-    if split["ingested"]:
-        raise Refused(f"{name_of(summary_path)}: {split['ingested']} of its calls that raised fell "
-                      "inside attempts that ingested their episode. Graphiti caught those "
-                      "failures and carried on, which can save an episode without what a call "
-                      "would have given (an edge's validity times, for example) and leaves the "
-                      "failed calls out of the token count")
-    if split["unknown"]:
-        raise Refused(f"{name_of(summary_path)}: {split['unknown']} of its calls that raised fell "
-                      "in no attempt that its log can place")
+            or not all(is_totals(totals) for totals in split.values())
+            or any(sum(split[outcome][name] for outcome in ATTEMPT_OUTCOMES) != summary.get(name)
+                   for name in TOTALS)):
+        raise Refused(f"{name_of(summary_path)} does not split its ingestion attempts' totals by "
+                      f"the outcome of their attempt (by_outcome: {', '.join(ATTEMPT_OUTCOMES)}, "
+                      f"each with {', '.join(TOTALS)}), or the split does not add up to them")
+    if split["ingested"]["api_errors"]:
+        raise Refused(f"{name_of(summary_path)}: {split['ingested']['api_errors']} of its calls "
+                      "that raised fell inside attempts that ingested their episode. Graphiti "
+                      "caught those failures and carried on, which can save an episode without "
+                      "what a call would have given (an edge's validity times, for example) and "
+                      "leaves the failed calls out of the token count")
+    if unplaced := split["unknown"]["calls"] + split["unknown"]["api_errors"]:
+        raise Refused(f"{name_of(summary_path)}: {unplaced} of its usage lines fall in no attempt "
+                      "that its log can place, so the rates cannot tell whether to count them")
+    unattributed = summary.get("unattributed")
+    if not is_totals(unattributed):
+        raise Refused(f"{name_of(summary_path)} does not count the calls that it attributes to no "
+                      f"episode and no removal (unattributed, with {', '.join(TOTALS)})")
+    if unattributed["api_errors"]:
+        raise Refused(f"{name_of(summary_path)}: {unattributed['api_errors']} of its calls that "
+                      "raised are attributed to no episode and no removal, so no attempt's "
+                      "outcome accounts for them")
     text_chars = prepared["text_chars"]
     if not isinstance(text_chars, int) or text_chars <= 0:
         raise Refused(f"{name_of(prepare_path)} counts no characters")
@@ -298,8 +327,9 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
     for arm, name in STREAM_FILES.items():
         hashes[arm] = {"file": name, "sha256": check_stream(streams_dir / name, manifest, arm)}
 
-    rates = (Fraction(summary["input_tokens"], text_chars),
-             Fraction(summary["output_tokens"], text_chars))
+    counted = {name: sum(split[outcome][name] for outcome in COUNTED) for name in TOTALS}
+    rates = (Fraction(counted["input_tokens"], text_chars),
+             Fraction(counted["output_tokens"], text_chars))
     full = {stream: manifest["streams"][stream]["chars"] for stream in STREAM_FILES}
     rows, total, cost = priced(full, rates, prices)
     projection = {
@@ -308,16 +338,23 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
         "inputs": hashes,
         "pilot": {key: summary.get(key) for key in ("episodes", "ok", "failed", "text_chars",
                                                     "input_tokens", "output_tokens", "calls",
-                                                    "api_errors", "api_errors_by_outcome",
-                                                    "calls_over_100k_input",
-                                                    "removal", "wall_s", "elapsed_s", "exit",
-                                                    "graphiti_core", "model", "images")},
+                                                    "api_errors", "by_outcome",
+                                                    "calls_over_100k_input", "removal",
+                                                    "unattributed", "wall_s", "elapsed_s",
+                                                    "exit", "graphiti_core", "model",
+                                                    "response_models", "images")},
         "rates": {"in_per_char": float(rates[0]), "out_per_char": float(rates[1]),
+                  "counted": {"outcomes": list(COUNTED),
+                              **{name: counted[name] for name in TOTALS[:3]},
+                              "text_chars": text_chars},
+                  "stopped": split["stopped"],
                   "rule": "input_tokens / text_chars and output_tokens / text_chars: the tokens "
-                          "of the run's ingestion attempts, every attempt counted and the calls "
-                          "that removed episodes not (summary.json; input tokens with the "
-                          "cache-creation and cache-read tokens), over prepare.json's "
-                          "characters"},
+                          "of the run's ingestion attempts that ingested their episode or failed "
+                          "(summary.json's by_outcome; input tokens with the cache-creation and "
+                          "cache-read tokens), over prepare.json's characters. The tokens of the "
+                          "attempts that stopped (stopped), whose work the environment's failure "
+                          "discarded and a resumed invocation did again, are not counted, and "
+                          "neither are the calls that removed episodes"},
         "price_basis": basis,
         "prices_usd_per_million_tokens": {"input": float(prices[0]), "output": float(prices[1])},
         "ingestions": rows,
@@ -331,6 +368,14 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
     if projection["pilot"]["failed"]:
         print(f"m0 project: {projection['pilot']['failed']} of the pilot's episodes failed; the "
               "rates are measured on the attempts as they ran", file=sys.stderr)
+    if (stopped := split["stopped"])["calls"] or stopped["api_errors"]:
+        print(f"m0 project: the stopped attempts' {stopped['calls']} calls and "
+              f"{stopped['api_errors']} that raised, {stopped['input_tokens']} input and "
+              f"{stopped['output_tokens']} output tokens, are reported apart and not counted in "
+              "the rates", file=sys.stderr)
+    if (named := summary.get("response_models")) != [MODEL]:
+        print(f"m0 project: the responses to calls that asked for {MODEL} named {named!r}",
+              file=sys.stderr)
     if cost > Fraction(budget):
         reduced = reduce(questions_path, streams_dir, rates, prices, Fraction(budget))
         projection["decision"], projection["k"] = "graphiti-reduced", reduced["k"]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -17,12 +18,15 @@ import time
 from pathlib import Path
 
 import pytest
-from asofbench_systems import usage
+from asofbench_systems import llm, usage
 from graphiti import adapter, ingest
 
 KEY = "sk-ant-api00-made-up-for-tests-0123456789"
 GRAPHITI = Path(__file__).resolve().parents[1] / "graphiti"
 IMAGES = {name: "sha256:" + str(n) * 64 for n, name in enumerate(ingest.IMAGE_NAMES, 1)}
+MODEL = "claude-haiku-5-5"
+# A made-up dated snapshot id, which the fake's responses name for the model its calls ask for.
+SNAPSHOT = "claude-haiku-5-5-20990101"
 
 
 def failure(module: str, name: str) -> type[Exception]:
@@ -63,12 +67,13 @@ def log_line(e: dict, ok: bool, uuid: str | None, wall_s: float = 2.0, attempts:
 
 
 def usage_line(context: str | None, input_tokens: int, output_tokens: int, created: int = 0,
-               read: int = 0, model: str = "claude-haiku-5-5", invocation: int | None = None,
-               attempt: int | None = None) -> dict:
+               read: int = 0, model: str = MODEL, invocation: int | None = None,
+               attempt: int | None = None, response_model: str | None = MODEL) -> dict:
     return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "invocation": invocation,
-            "attempt": attempt, "model": model, "input_tokens": input_tokens,
-            "output_tokens": output_tokens, "cache_creation_input_tokens": created,
-            "cache_read_input_tokens": read, "stop_reason": "tool_use"}
+            "attempt": attempt, "model": model, "response_model": response_model,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "cache_creation_input_tokens": created, "cache_read_input_tokens": read,
+            "stop_reason": "tool_use"}
 
 
 def write_jsonl(path: Path, lines: list[dict]) -> None:
@@ -99,7 +104,7 @@ class FakeEngine:
         self.source, self.version, self.closed = "text", "0.31.2", False
 
     def call(self, tokens: int) -> None:
-        self.usage_log.record(usage.attribution(), "claude-haiku-5-5",
+        self.usage_log.record(usage.attribution(), MODEL, SNAPSHOT,
                               {"input_tokens": tokens, "output_tokens": tokens // 10}, "tool_use")
 
     async def add_episode(self, **arguments) -> str:
@@ -254,6 +259,8 @@ def test_resume_continues_after_the_logged_episodes_and_never_retries_a_failed_o
     assert record["invocations"][1]["exit"] == ingest.EXIT_FAILED
     assert (summary["graphiti_core"], summary["model"], summary["arm"]) == (
         "0.31.2", "claude-haiku-5-5", "H+")
+    # The model every call asked for, and the ids the responses named, a snapshot's among them.
+    assert summary["response_models"] == [MODEL, SNAPSHOT]
     assert (summary["exit"], summary["api_errors"]) == (ingest.EXIT_FAILED, 0)
     assert summary["removal"] == summary["unattributed"] == {
         "input_tokens": 0, "output_tokens": 0, "calls": 0, "api_errors": 0}
@@ -443,6 +450,32 @@ def test_a_resume_refuses_another_stream_or_arm_or_a_missing_run(tmp_path):
     assert len(harness.engines) == 1
 
 
+def test_a_key_file_that_cannot_be_read_is_refused_naming_the_file_and_never_its_content(
+        tmp_path):
+    # On a Linux host the secret keeps the host file's owner and mode, which the images' user,
+    # uid 10001, may not be able to read; Docker Desktop's file sharing hides this.
+    episodes = [episode(1, kind="create")]
+    harness = Harness(tmp_path, episodes)
+    unreadable = tmp_path / "unreadable"
+    unreadable.write_text(KEY + "\n", encoding="ascii")
+    unreadable.chmod(0)
+    no_key = tmp_path / "no-key"
+    no_key.write_text(f"{KEY}\n{KEY}\n", encoding="ascii")
+    cases = [(tmp_path / "missing", "cannot be read"), (tmp_path, "cannot be read"),
+             (no_key, "does not hold an API key")]
+    if os.geteuid() != 0:  # root reads a file whatever its mode
+        cases.append((unreadable, "cannot be read (Permission denied)"))
+    for path, why in cases:
+        harness.key_file = path
+        for attempt in (lambda: harness.run(resume=False), lambda: harness.remove(["any-uuid"])):
+            with pytest.raises(ingest.Refused) as caught:
+                attempt()
+            message = str(caught.value)
+            assert f"{path} {why}" in message and "uid 10001" in message, message
+            assert KEY not in message
+    assert harness.engines == [] and list(harness.out.iterdir()) == []
+
+
 def test_episode_arguments_follow_the_configuration():
     e = episode(3, "ERC-20", "eth", kind="rename", text="")
     arguments = adapter.episode_arguments(e, previous_episode_uuids=["a", "b"],
@@ -583,11 +616,18 @@ def test_summary_counts_calls_over_100k_input_tokens_and_names_every_model():
     assert summary["calls_over_100k_input"] == 1
     assert (summary["calls"], summary["arm"], summary["model"]) == (4, "CF", "claude-haiku-5-5")
     assert (summary["elapsed_s"], summary["invocations"]) == (15.5, 3)
-    lines.append(usage_line(a, 1, 1, model="claude-sonnet-5-5"))
+    # ``model`` is the model the calls asked for; the ids the responses named are listed apart,
+    # and a call that raised names none.
+    lines += [usage_line(a, 2, 1, response_model=SNAPSHOT),
+              {**usage_line(a, 0, 0, response_model=None), "error": "OverloadedError"}]
+    summary = ingest.summarize(episodes, log, lines, record_of([1.0]), graphiti_core="0.31.2")
+    assert (summary["model"], summary["response_models"]) == (MODEL, [MODEL, SNAPSHOT])
+    lines.append(usage_line(a, 1, 1, model="claude-sonnet-5-5", response_model="claude-sonnet-5-5"))
     summary = ingest.summarize(episodes, log, lines, record_of([1.0]), graphiti_core="0.31.2")
     assert summary["model"] == ["claude-haiku-5-5", "claude-sonnet-5-5"]
-    assert ingest.summarize(episodes, [], [], record_of([1.0]),
-                            graphiti_core="0.31.2")["model"] is None
+    assert summary["response_models"] == [MODEL, SNAPSHOT, "claude-sonnet-5-5"]
+    empty = ingest.summarize(episodes, [], [], record_of([1.0]), graphiti_core="0.31.2")
+    assert (empty["model"], empty["response_models"]) == (None, [])
 
 
 def test_config_json_records_the_adapter_s_configuration_and_the_lock():
@@ -609,6 +649,20 @@ def test_config_json_records_the_adapter_s_configuration_and_the_lock():
         if marker is None or "linux" in marker:
             pins[name] = version
     assert adapter.recorded_packages(config) == pins
+
+
+def test_the_environment_s_proxy_outlasts_the_client_s_request_timeout():
+    """compose.yaml gives the egress proxy an idle timeout longer than the timeout that the
+    client config.json records gives a request, so that the proxy never cuts a request the
+    client still waits on, and config.json records both."""
+    config = json.loads((GRAPHITI / "config.json").read_text(encoding="utf-8"))
+    compose = (GRAPHITI / "compose.yaml").read_text(encoding="utf-8")
+    (value,) = re.findall(r"^\s+EGRESS_IDLE_TIMEOUT:\s*\"?([0-9.]+)\"?\s*$", compose, re.M)
+    client = inspect.signature(llm.make_async_client).parameters
+    assert config["llm"]["timeout_s"] == client["timeout_s"].default
+    assert config["llm"]["max_retries"] == client["max_retries"].default
+    assert float(value) == config["network_policy"]["proxy"]["idle_timeout_s"]
+    assert float(value) >= config["llm"]["timeout_s"] + 60
 
 
 def test_a_second_invocation_stops_at_once_while_one_holds_the_lock(tmp_path):
@@ -782,13 +836,18 @@ def by_outcome(ingested: int = 0, failed: int = 0, stopped: int = 0, unknown: in
     return {"ingested": ingested, "failed": failed, "stopped": stopped, "unknown": unknown}
 
 
+def errors_by_outcome(summary: dict) -> dict:
+    """The calls that raised in the attempts of each outcome, from summary.json's split."""
+    return {outcome: totals["api_errors"] for outcome, totals in summary["by_outcome"].items()}
+
+
 def test_a_call_that_raised_inside_an_ingested_attempt_is_counted_as_ingested(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     harness = Harness(tmp_path, episodes)
     assert harness.run(resume=False, outcomes={episodes[1]["episode_id"]: ["swallowed"]}) == 0
     summary = harness.summary()
     assert (summary["ok"], summary["api_errors"], summary["calls"]) == (2, 1, 4)
-    assert summary["api_errors_by_outcome"] == by_outcome(ingested=1)
+    assert errors_by_outcome(summary) == by_outcome(ingested=1)
     (failed,) = [line for line in harness.usage() if line["error"]]
     assert (failed["context"], failed["invocation"], failed["attempt"]) == (
         episodes[1]["episode_id"], 1, 1)
@@ -805,14 +864,14 @@ def test_calls_that_raised_inside_failed_or_stopped_attempts_are_reported_apart(
     # overloaded.
     assert harness.run(resume=False, outcomes={ids[1]: ["bad-request"],
                                                ids[2]: ["overloaded"]}) == ingest.EXIT_STOPPED
-    assert harness.summary()["api_errors_by_outcome"] == by_outcome(failed=1, stopped=1)
+    assert errors_by_outcome(harness.summary()) == by_outcome(failed=1, stopped=1)
     # The resume ingests the third episode in its own first attempt. That attempt has the
     # stopped one's number, 1, in another invocation, so it does not take the stopped one's
     # failed call as its own.
     assert harness.run(resume=True) == ingest.EXIT_INGESTED
     summary = harness.summary()
     assert (summary["ok"], summary["api_errors"]) == (3, 2)
-    assert summary["api_errors_by_outcome"] == by_outcome(failed=1, stopped=1)
+    assert errors_by_outcome(summary) == by_outcome(failed=1, stopped=1)
     assert [(line["episode_id"], line["invocation"], line["attempts"])
             for line in harness.log()] == [(ids[0], 1, 1), (ids[1], 1, 2), (ids[2], 2, 1)]
     assert [(line["context"], line["invocation"], line["attempt"], line["error"])
@@ -822,6 +881,28 @@ def test_calls_that_raised_inside_failed_or_stopped_attempts_are_reported_apart(
     assert sorted({(line["context"], line["invocation"], line["attempt"])
                    for line in harness.usage()}) == sorted(
         [(ids[0], 1, 1), (ids[1], 1, 1), (ids[1], 1, 2), (ids[2], 1, 1), (ids[2], 2, 1)])
+
+
+def test_summary_splits_the_attempts_tokens_and_calls_by_the_outcome_of_their_attempt(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2), episode(3)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    # The second episode's first attempt fails and its second ingests it; the third's first
+    # attempt stops the run on a call that stayed overloaded, and the resume ingests it.
+    assert harness.run(resume=False, outcomes={ids[1]: [ValueError("bad output")],
+                                               ids[2]: ["overloaded"]}) == ingest.EXIT_STOPPED
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    summary = harness.summary()
+    # Each attempt of the fake makes two calls, of 1,000 and 2,000 input tokens and a tenth of
+    # that out; the stopped one also makes the call that raised.
+    attempt = {"input_tokens": 3000, "output_tokens": 300, "calls": 2, "api_errors": 0}
+    assert summary["by_outcome"] == {
+        "ingested": {name: 3 * value for name, value in attempt.items()},
+        "failed": attempt, "stopped": {**attempt, "api_errors": 1},
+        "unknown": dict.fromkeys(attempt, 0)}
+    for name in attempt:
+        assert summary[name] == sum(totals[name] for totals in summary["by_outcome"].values())
+    assert "api_errors_by_outcome" not in summary
 
 
 def test_a_call_is_placed_in_its_attempt_by_the_invocation_and_the_number_together():
@@ -856,7 +937,9 @@ def test_summary_counts_ingestion_attempts_apart_from_removal_and_unattributed_c
     assert {key: summary[key] for key in ("input_tokens", "output_tokens", "calls",
                                           "api_errors")} == {
         "input_tokens": 155, "output_tokens": 15, "calls": 2, "api_errors": 1}
-    assert summary["api_errors_by_outcome"] == by_outcome(ingested=1)
+    assert errors_by_outcome(summary) == by_outcome(ingested=1)
+    assert summary["by_outcome"]["ingested"] == {"input_tokens": 155, "output_tokens": 15,
+                                                 "calls": 2, "api_errors": 1}
     assert summary["removal"] == {"input_tokens": 1000, "output_tokens": 100, "calls": 1,
                                   "api_errors": 1}
     assert summary["unattributed"] == {"input_tokens": 7, "output_tokens": 1, "calls": 1,

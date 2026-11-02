@@ -29,6 +29,9 @@ services:
     build: ../env/egress
     environment:
       EGRESS_ALLOW: api.anthropic.com:443
+      # Longer than the 600 s the client gives a request (config.json), so that the proxy never
+      # closes a tunnel while the client still waits on a response.
+      EGRESS_IDLE_TIMEOUT: "660"
     networks:
       - inner
       - outer

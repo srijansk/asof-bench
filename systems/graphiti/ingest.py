@@ -3,20 +3,22 @@
     ingest --stream /input/<file>.jsonl --arm H+|H-|CF --out /output [--resume]
            [--skip-episode <episode_id>]...
 
-Every invocation first takes the output directory's lock, by creating ``run.lock`` there with
-O_EXCL (``hold_lock``), and holds it to its end; a second invocation on the same directory stops at
-once. A SIGTERM, which ``docker stop`` sends, cancels the invocation, which then records itself
-and releases the lock (``cancelled_on_sigterm``). Then it waits for the
-environment's services and runs the network check (env/netcheck.py, with the README's arguments,
-``--services embedder:8080,neo4j:7687`` and ``--mounts`` its input, output and secret paths),
-whose report it writes to ``/output/netcheck.json``, and ingests nothing unless every check
-passes. Then it builds Graphiti as adapter.py configures it, checks that the store holds exactly
-the episodes that the ingest log records as ingested (none, for a new run), and ingests the
-stream's episodes: one group per corpus (Graphiti's ``group_id``), the episodes of a group
-strictly in stream order, each awaited before the next, and the two groups concurrently. While an
-episode is ingested, every model call is recorded in the usage log under its id, the invocation
-(its place in run.json's ``invocations``, from 1) and the attempt (from 1, within the invocation),
-so that a call that raised can be placed in the attempt it fell in (``attempt_outcome``).
+Every invocation first checks that it can read the API key file (``check_key_file``), then takes
+the output directory's lock, by creating ``run.lock`` there with O_EXCL (``hold_lock``), and holds
+it to its end; a second invocation on the same directory stops at once. A SIGTERM, which ``docker
+stop`` sends, cancels the invocation, which then records itself and releases the lock
+(``cancelled_on_sigterm``), except while the wait for the services or the network check blocks
+it. Then it waits for the environment's services and runs the network check (env/netcheck.py,
+with the README's arguments, ``--services embedder:8080,neo4j:7687`` and ``--mounts`` its input,
+output and secret paths), whose report it writes to ``/output/netcheck.json``, and ingests
+nothing unless every check passes. Then it builds Graphiti as adapter.py configures it, checks
+that the store holds exactly the episodes that the ingest log records as ingested (none, for a
+new run), and ingests the stream's episodes: one group per corpus (Graphiti's ``group_id``), the
+episodes of a group strictly in stream order, each awaited before the next, and the two groups
+concurrently. While an episode is ingested, every model call is recorded in the usage log under
+its id, the invocation (its place in run.json's ``invocations``, from 1) and the attempt (from 1,
+within the invocation), so that a call can be placed in the attempt it fell in
+(``attempt_outcome``).
 
 An episode that raises is retried in place, after RETRY_DELAYS_S (two more attempts), with the
 same previous episodes and saga predecessor; one that still raises is logged as failed and is
@@ -56,10 +58,10 @@ It writes, in ``--out``, and none of these files holds a local path:
 
 Exit status: 0 when every episode of the stream is ingested; 1 when the run reached the stream's
 end with an episode logged as failed; 2 when the run is refused before it starts (another
-invocation holds the lock, a bad argument, an output directory that holds a run without
-``--resume``, a log, stream, arm or store that does not match), when the network check fails, or
-when an infrastructure error stops it; 3 when consecutive failures stop it; 4 when it crashes,
-which run.json records with the exception's class.
+invocation holds the lock, a key file it cannot read, a bad argument, an output directory that
+holds a run without ``--resume``, a log, stream, arm or store that does not match), when the
+network check fails, or when an infrastructure error stops it; 3 when consecutive failures stop
+it; 4 when it crashes, which run.json records with the exception's class.
 
 ``remove_episodes`` (``python -m graphiti.adapter --remove-episodes``) removes from the store an
 episode that an attempt left there, under the same lock, after the same network check, and
@@ -102,8 +104,8 @@ LOG, USAGE, SUMMARY, NETCHECK, RUN, LOCK = ("ingest-log.jsonl", "usage.jsonl", "
                                             "netcheck.json", "run.json", "run.lock")
 LOG_FIELDS = ("episode_id", "proposal", "group_id", "episode_uuid", "ok", "error", "started_at",
               "wall_s", "text_chars", "attempts", "invocation")
-# The outcomes of the attempt that a call which raised fell in (``attempt_outcome``), by which
-# summary.json splits its ``api_errors``.
+# The outcomes of the attempt that a usage line fell in (``attempt_outcome``), by which
+# summary.json splits the ingestion attempts' tokens, calls and calls that raised (``by_outcome``).
 ATTEMPT_OUTCOMES = ("ingested", "failed", "stopped", "unknown")
 # The fields of a stream's episode (section 8).
 EPISODE_FIELDS = ("episode_id", "corpus", "repo", "proposal", "ref", "recorded_at", "commit",
@@ -227,6 +229,18 @@ def parse_image_ids(text: str | None) -> dict[str, str]:
     return {name: images[name] for name in IMAGE_NAMES}
 
 
+def check_key_file(key_file: str) -> None:
+    """Refused unless the API key file can be read and holds a key. The refusal names the file and
+    why, never what it holds: on a Linux host the secret keeps the host file's owner and mode,
+    which the container's user, uid 10001, must be able to read."""
+    try:
+        llm.read_key(key_file)
+    except llm.KeyFileError as error:
+        raise Refused(f"the API key file {error}: it reaches the container as the Docker secret, "
+                      "which the container's user, uid 10001, must be able to read "
+                      "(systems/graphiti/README.md)") from None
+
+
 def held_by(path: Path) -> str:
     """Who holds the lock at ``path``, and how old its heartbeat is, as far as the file says."""
     try:
@@ -290,7 +304,10 @@ def hold_lock(out_dir: Path, command: str = "ingest") -> Iterator[None]:
 def cancelled_on_sigterm() -> Iterator[None]:
     """Cancels the running task on SIGTERM, which ``docker stop`` sends and which a container's
     first process otherwise ignores, so that the invocation unwinds: it records its exit status
-    4 in run.json, closes Graphiti and releases its lock."""
+    4 in run.json, closes Graphiti and releases its lock. The handler runs on the event loop, so
+    while the wait for the services or the network check blocks the loop it cannot run; Docker's
+    SIGKILL, 10 s after the SIGTERM, then ends the invocation outright, which leaves its lock and
+    a null exit in run.json (README.md says how to recover)."""
     loop, task = asyncio.get_running_loop(), asyncio.current_task()
     try:
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
@@ -494,29 +511,30 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
     """summary.json: the run's stream (file name and SHA-256) and arm; the stream's ``episodes``
     and ``text_chars`` (code points of ``text``); the episodes ``ok`` (ingested) and ``failed``
     (logged as failed, skipped ones included); the ingestion attempts' ``input_tokens`` (cache
-    tokens included), ``output_tokens``, ``calls`` (responses), ``api_errors`` (calls that
-    raised), ``api_errors_by_outcome`` (those calls by the outcome of the attempt they fell in,
-    as ``attempt_outcome`` gives it) and ``calls_over_100k_input`` (prompts beyond the price
-    basis's 100,000 tokens), the lines of every attempt counted, failed ones included; the same
-    totals but the split for the calls that removing episodes made (``removal``) and for any
+    tokens included), ``output_tokens``, ``calls`` (responses) and ``api_errors`` (calls that
+    raised), the lines of every attempt counted, failed and stopped ones included;
+    ``by_outcome``, the same four totals for the attempts of each outcome, as
+    ``attempt_outcome`` places a line (``ingested``, ``failed``, ``stopped``, ``unknown``), which
+    add up to them; ``calls_over_100k_input`` (prompts beyond the price basis's 100,000 tokens);
+    the same four totals for the calls that removing episodes made (``removal``) and for any
     other line (``unattributed``); ``wall_s``, the sum of every episode's attempt time, which
-    counts the two groups' time apart, and
-    ``elapsed_s``, the wall-clock time of the run's invocations, summed (an invocation that was
-    killed has none); ``invocations``; ``exit``, the exit status of the last invocation, the one
-    that wrote it; ``graphiti_core``; ``model``, the models of the usage lines (one name, or a
-    list when there are several, null when there is no line); and ``images``, each image's IDs
+    counts the two groups' time apart, and ``elapsed_s``, the wall-clock time of the run's
+    invocations, summed (an invocation that was killed has none); ``invocations``; ``exit``, the
+    exit status of the last invocation, the one that wrote it; ``graphiti_core``; ``model``, the
+    model that the usage lines' calls asked for (one name, or a list when there are several,
+    null when there is no line); ``response_models``, the model ids that the responses named, a
+    dated snapshot of the model asked for among them, sorted; and ``images``, each image's IDs
     over the invocations. Each line is counted once."""
     ids = {e["episode_id"] for e in episodes}
     logged = {line["episode_id"]: line for line in log if line["episode_id"] in ids}
     outcome = {episode_id: line["ok"] for episode_id, line in logged.items()}
     ingestion, removal, unattributed = [], [], []
-    by_outcome = dict.fromkeys(ATTEMPT_OUTCOMES, 0)
+    by_outcome: dict[str, list[dict]] = {name: [] for name in ATTEMPT_OUTCOMES}
     for line in usage_lines:
         context = line["context"]
         if context in ids:
             ingestion.append(line)
-            if line.get("error"):
-                by_outcome[attempt_outcome(line, logged)] += 1
+            by_outcome[attempt_outcome(line, logged)].append(line)
         elif isinstance(context, str) and context.startswith(REMOVAL_CONTEXT):
             removal.append(line)
         else:
@@ -529,7 +547,8 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
             "stream_sha256": record["stream_sha256"], "episodes": len(episodes),
             "ok": sum(outcome.values()), "failed": len(outcome) - sum(outcome.values()),
             "text_chars": sum(len(e["text"]) for e in episodes),
-            **totals(ingestion), "api_errors_by_outcome": by_outcome,
+            **totals(ingestion),
+            "by_outcome": {name: totals(lines) for name, lines in by_outcome.items()},
             "calls_over_100k_input": sum(input_tokens(line) > PRICED_INPUT_TOKENS
                                          for line in ingestion),
             "removal": totals(removal), "unattributed": totals(unattributed),
@@ -539,6 +558,8 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
             "invocations": len(invocations), "exit": invocations[-1]["exit"],
             "graphiti_core": graphiti_core,
             "model": (models[0] if len(models) == 1 else models) if models else None,
+            "response_models": sorted({line["response_model"] for line in usage_lines
+                                       if line.get("response_model")}),
             "images": images}
 
 
@@ -724,6 +745,7 @@ async def run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: di
         raise Refused("--skip-episode needs --resume")
     if not out_dir.is_dir():
         raise Refused(f"{out_dir} is not a directory")
+    check_key_file(key_file)
     with hold_lock(out_dir, "ingest"), cancelled_on_sigterm():
         return await _run(stream, arm, out_dir, resume=resume, images=images, skip=list(skip),
                           open_engine=open_engine, preflight=preflight, key_file=key_file,
@@ -807,11 +829,12 @@ async def _run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: d
             progress(f"ingest: stopped (exit {code}): {stop.reason}")
         progress(f"ingest: {summary['ok']} of {summary['episodes']} episodes ingested, "
                  f"{summary['failed']} failed; {summary['calls']} model calls and "
-                 f"{summary['api_errors']} that raised (by the outcome of their attempt: "
-                 + ", ".join(f"{name} {count}" for name, count
-                             in summary["api_errors_by_outcome"].items())
-                 + f"), {summary['input_tokens']} input and "
-                 f"{summary['output_tokens']} output tokens; summary in {SUMMARY}")
+                 f"{summary['api_errors']} that raised, {summary['input_tokens']} input and "
+                 f"{summary['output_tokens']} output tokens; by the outcome of their attempt: "
+                 + "; ".join(f"{name} {t['calls']} calls, {t['api_errors']} raised, "
+                             f"{t['input_tokens']} input and {t['output_tokens']} output tokens"
+                             for name, t in summary["by_outcome"].items())
+                 + f"; summary in {SUMMARY}")
         return code
 
 
@@ -835,6 +858,7 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
     not in the store; Refused for a uuid the log records as ingested."""
     if not out_dir.is_dir():
         raise Refused(f"{out_dir} is not a directory")
+    check_key_file(key_file)
     with hold_lock(out_dir, "remove-episodes"), cancelled_on_sigterm():
         begun = time.monotonic()
         run_path = out_dir / RUN

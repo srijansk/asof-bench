@@ -16,9 +16,10 @@ same configuration, and README.md describes it).
 - Cross-encoder: ``NoReranker``, whose ``rank`` raises, since no system reranks with a model.
 - Episodes: ``group_id`` is the episode's corpus; one saga per proposal, named by its id; the
   previous episodes are the same proposal's last ``EPISODE_WINDOW_LEN`` ingested episodes, all
-  recorded before it, oldest first, and the saga predecessor the last of them; the episode's text
-  is ``asofbench_systems.stream.render_episode``; no entity or edge types, no custom extraction
-  instructions, no community update.
+  recorded before it, oldest first, and the saga predecessor the last of them, a deliberate
+  departure from ``add_episode``'s own default, which reads the group's 10 most recent episodes;
+  the episode's text is ``asofbench_systems.stream.render_episode``; no entity or edge types, no
+  custom extraction instructions, no community update.
 
 The module's constants and ``episode_arguments`` use only the standard library and the shared
 package; graphiti-core and anthropic are imported only inside the functions that build Graphiti,
@@ -50,8 +51,11 @@ EMBEDDER_URL = "http://embedder:8080/v1"
 EMBEDDING_DIM = 2048
 DOCUMENT_MODEL = "voyage-4-nano-document"
 QUERY_MODEL = "voyage-4-nano-query"
-# Graphiti's EPISODE_WINDOW_LEN (graphiti_core.utils.maintenance.graph_data_operations), the
-# number of previous episodes Graphiti reads as an episode's context; the self-test checks it.
+# The number of the same proposal's previous episodes that each episode is given: 3, the value of
+# Graphiti's EPISODE_WINDOW_LEN (graphiti_core.utils.maintenance.graph_data_operations), which
+# the self-test checks. Graphiti's own add_episode default, when no previous_episode_uuids is
+# given, would read the group's 10 most recent episodes (RELEVANT_SCHEMA_LIMIT); the adapter's
+# per-proposal, oldest-first window departs from that default on purpose (README.md).
 EPISODE_WINDOW_LEN = 3
 # Graphiti's DEFAULT_SEMAPHORE_LIMIT, left in force: SEMAPHORE_LIMIT is not set.
 SEMAPHORE_LIMIT = 20

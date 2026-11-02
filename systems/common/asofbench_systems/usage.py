@@ -13,16 +13,19 @@ afresh, so the invocation is part of the attempt's name). ``attributed`` sets bo
 call is recorded in ``log``, a response with ``UsageLog.record`` and a call that raises with
 ``UsageLog.record_error``:
 
-    {"ts", "context", "invocation", "attempt", "model", "input_tokens", "output_tokens",
-     "cache_creation_input_tokens", "cache_read_input_tokens", "stop_reason", "error"}
+    {"ts", "context", "invocation", "attempt", "model", "response_model", "input_tokens",
+     "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "stop_reason",
+     "error"}
 
-``invocation`` and ``attempt`` are null where nothing set them. For a response, ``model`` is the
-model that answered, the four counts are its ``usage`` (a missing count written as 0) and
-``error`` is null. For a call that raises (after the SDK's own retries, which are inside one
-call), ``model`` is the model asked for, the counts are 0, ``stop_reason`` is null and ``error``
-is the exception's class name, nothing more: the system may catch the exception and carry on, and
-the line keeps the failure visible. Only ``messages.create`` without streaming is recorded: a
-streaming call through the wrapper is refused, since its usage is not known when it returns.
+``invocation`` and ``attempt`` are null where nothing set them. On every line ``model`` is the
+model the call asked for, its ``model`` argument. For a response, ``response_model`` is the model
+id the response names, which can be a dated snapshot of the model asked for, the four counts are
+its ``usage`` (a missing count written as 0) and ``error`` is null. For a call that raises (after
+the SDK's own retries, which are inside one call), ``response_model`` is null, the counts are 0,
+``stop_reason`` is null and ``error`` is the exception's class name, nothing more: the system may
+catch the exception and carry on, and the line keeps the failure visible. Only
+``messages.create`` without streaming is recorded: a streaming call through the wrapper is
+refused, since its usage is not known when it returns.
 
 It uses only the standard library.
 """
@@ -88,31 +91,37 @@ class UsageLog:
     def _attributed(attribution: dict) -> dict:
         return {name: attribution[name] for name in ("context", "invocation", "attempt")}
 
-    def record(self, attribution: dict, model: str, response_usage,
-               stop_reason: str | None) -> None:
+    def record(self, attribution: dict, model: str | None, response_model: str | None,
+               response_usage, stop_reason: str | None) -> None:
+        """A response: ``model`` is the model the call asked for, ``response_model`` the model id
+        the response names."""
         self._append({"ts": self._now(), **self._attributed(attribution), "model": model,
+                      "response_model": response_model,
                       **{name: _count(response_usage, name) for name in COUNTS},
                       "stop_reason": stop_reason, "error": None})
 
     def record_error(self, attribution: dict, model: str | None, error: str) -> None:
+        """A call that raised: ``model`` is the model it asked for, ``error`` the class name."""
         self._append({"ts": self._now(), **self._attributed(attribution), "model": model,
-                      **{name: 0 for name in COUNTS}, "stop_reason": None, "error": error})
+                      "response_model": None, **{name: 0 for name in COUNTS},
+                      "stop_reason": None, "error": error})
 
 
 def instrument(client, log: UsageLog):
     """Wraps ``client.messages.create`` so that every call is recorded in ``log`` under the
-    current attribution; returns ``client``."""
+    current attribution, with the model it asked for; returns ``client``."""
     create = client.messages.create
 
     async def recorded(*args, **kwargs):
         if kwargs.get("stream"):
             raise NotImplementedError("the usage log records calls without streaming only")
+        model = kwargs.get("model")
         try:
             response = await create(*args, **kwargs)
         except Exception as error:
-            log.record_error(attribution(), kwargs.get("model"), type(error).__name__)
+            log.record_error(attribution(), model, type(error).__name__)
             raise
-        log.record(attribution(), getattr(response, "model", None) or kwargs.get("model"),
+        log.record(attribution(), model, getattr(response, "model", None),
                    getattr(response, "usage", None), getattr(response, "stop_reason", None))
         return response
 

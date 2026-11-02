@@ -35,7 +35,7 @@
     "max_retries": 8,
     "timeout_s": 600.0,
     "sdk": "anthropic 0.111.0, which sends anthropic-version 2023-06-01",
-    "usage_log": "asofbench_systems.usage.instrument wraps client.messages.create and records every response in usage.jsonl under the episode being ingested"
+    "usage_log": "asofbench_systems.usage.instrument wraps client.messages.create and records every response in usage.jsonl under the episode being ingested, each line with the model the call asked for (model) and the model id the response named (response_model), which can be a dated snapshot of it"
   },
   "embedder": {
     "client": "graphiti_core.embedder.openai.OpenAIEmbedder",
@@ -77,7 +77,8 @@
     "saga": "one saga per proposal, named by the episode's proposal id, with saga_previous_episode_uuid from the adapter's state (the proposal's last ingested episode)",
     "previous_episodes": {
       "count": 3,
-      "rule": "previous_episode_uuids is the uuids of the same proposal's last 3 ingested episodes (Graphiti's EPISODE_WINDOW_LEN), all recorded before the episode, oldest first, and empty for its first episode; the saga predecessor is the last of them. Graphiti's get_by_uuids does not order the episodes it returns, so the window's order inside Graphiti's prompt is Graphiti's own"
+      "rule": "previous_episode_uuids is the uuids of the same proposal's last 3 ingested episodes (3, the value of Graphiti's EPISODE_WINDOW_LEN), all recorded before the episode, oldest first, and empty for its first episode; the saga predecessor is the last of them. Graphiti's get_by_uuids does not order the episodes it returns, so the window's order inside Graphiti's prompt is Graphiti's own",
+      "graphiti_default": "Graphiti's own add_episode default would read the group's 10 most recent episodes (RELEVANT_SCHEMA_LIMIT, retrieve_episodes by reference time, when no previous_episode_uuids is given); EPISODE_WINDOW_LEN is the default of retrieve_episodes and of the bulk path. The adapter's per-proposal, oldest-first window of 3 is a deliberate departure from that default, which maintainers are invited to review"
     },
     "name": "episode_id",
     "episode_body": "asofbench_systems.stream.render_episode, the one episode template of every store system",
@@ -96,9 +97,10 @@
     "consecutive_failures": "5 logged failures in a row in a group stop the run with exit status 3",
     "resume": "ingest --resume continues each group from its first episode with no log line, on the stream and arm the run began with",
     "skip": "ingest --resume --skip-episode <episode_id> logs the first episode of its group with no log line as failed (skipped by the operator after repeated infrastructure stops), records it in run.json and goes on",
-    "lock": "every invocation, the removal of episodes included, holds the output directory's lock: it creates run.lock with O_EXCL (flock and lockf do not exclude across containers on Docker Desktop's bind mounts), touches it every 30 s and removes it at its end; a second one stops at once with exit status 2; a SIGTERM cancels the invocation, which records itself and releases the lock; one killed outright leaves the lock, for the operator to remove once it is gone",
+    "lock": "every invocation, the removal of episodes included, holds the output directory's lock: it creates run.lock with O_EXCL (flock and lockf do not exclude across containers on Docker Desktop's bind mounts), touches it every 30 s and removes it at its end; a second one stops at once with exit status 2; a SIGTERM cancels the invocation, which records itself and releases the lock, except during the network check or the wait for the services, which block the invocation past Docker's 10 s grace, so that Docker's SIGKILL ends it outright; one killed outright leaves the lock and a null exit in run.json, for the operator to remove once it is gone",
     "crash": "an exception that no rule expects ends the invocation with exit status 4, which run.json records with the exception's class",
-    "calls_that_raise": "every call that raises after the SDK's retries is a usage line with no tokens and its exception's class, under the episode, the invocation and the attempt that made it, so that a failure Graphiti catches and carries on from stays visible; summary.json counts them as api_errors, split by the outcome of the attempt they fell in (api_errors_by_outcome: ingested, failed, stopped, unknown), and M0 refuses those inside an attempt that ingested its episode and those no attempt can place"
+    "calls_that_raise": "every call that raises after the SDK's retries is a usage line with no tokens and its exception's class, under the episode, the invocation and the attempt that made it, so that a failure Graphiti catches and carries on from stays visible; summary.json counts them as api_errors and splits them, with the ingestion attempts' tokens and calls, by the outcome of the attempt they fell in (by_outcome: ingested, failed, stopped, unknown); M0 refuses those inside an attempt that ingested its episode, any usage line that no attempt can place and any call that raised outside every episode and removal",
+    "stopped_attempts": "an attempt whose invocation left its episode unlogged (a stop, a crash or a kill) is counted in summary.json under by_outcome's stopped; M0's rates leave those tokens out and report them apart, since the environment's failure discarded that work and a resumed invocation did it again"
   },
   "concurrency": {
     "semaphore_limit": 20,
@@ -114,6 +116,13 @@
         "for": "the construction model, claude-haiku-5-5, which builds Graphiti's store"
       }
     ],
+    "proxy": {
+      "allow": "api.anthropic.com:443 (EGRESS_ALLOW in compose.yaml)",
+      "idle_timeout_s": 660,
+      "idle_timeout": "EGRESS_IDLE_TIMEOUT in compose.yaml: the proxy closes a tunnel that neither side has used for 660 s, a minute longer than the client's 600 s request timeout, since a non-streaming request receives nothing until its response begins; a request therefore ends at the client's timeout, never cut short by the proxy",
+      "limits": "the proxy's stated limits: it relays TLS uninspected, so it checks the host and port of the CONNECT request and never the server name (SNI) that the TLS handshake sends inside a tunnel to api.anthropic.com:443, which is therefore not checked against the CONNECT host; and it has no cap on concurrent connections",
+      "log": "one JSON line per request (ts, client, method, target, allowed, reason) and nothing of what passes through a tunnel; the operator saves it beside the run's outputs (README.md)"
+    },
     "services_inside": [
       {"name": "neo4j", "port": 7687, "holds": "Neo4j 5.26 community and the graph Graphiti writes there, on the run's own volume"},
       {"name": "embedder", "port": 8080, "holds": "the voyage-4-nano server and the model's weights"},

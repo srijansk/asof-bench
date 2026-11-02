@@ -7,6 +7,7 @@ API."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import socket
 import socketserver
@@ -256,3 +257,43 @@ def test_the_allowlist_comes_from_egress_allow(monkeypatch):
         monkeypatch.setenv("EGRESS_ALLOW", bad)
         with pytest.raises(ValueError):
             proxy.allowlist()
+
+
+def test_the_idle_timeout_comes_from_egress_idle_timeout(monkeypatch):
+    monkeypatch.delenv("EGRESS_IDLE_TIMEOUT", raising=False)
+    assert proxy.idle_timeout() == proxy.DEFAULT_IDLE_TIMEOUT == 660.0
+    monkeypatch.setenv("EGRESS_IDLE_TIMEOUT", " 900 ")
+    assert proxy.idle_timeout() == 900.0
+    monkeypatch.setenv("EGRESS_IDLE_TIMEOUT", "0.5")
+    assert proxy.idle_timeout() == 0.5
+    for bad in ("", "0", "-5", "soon", "inf", "nan", "1e400", "10 s"):
+        monkeypatch.setenv("EGRESS_IDLE_TIMEOUT", bad)
+        with pytest.raises(ValueError, match="EGRESS_IDLE_TIMEOUT"):
+            proxy.idle_timeout()
+
+
+def test_the_idle_timeout_outlasts_the_client_s_request_timeout():
+    """A non-streaming request sends nothing back until its response begins, so a tunnel that
+    the proxy closed sooner than the client's own timeout would cut a request that the provider
+    may complete and bill, and the client would send it again."""
+    from asofbench_systems import llm
+
+    client_timeout = inspect.signature(llm.make_async_client).parameters["timeout_s"].default
+    assert proxy.DEFAULT_IDLE_TIMEOUT >= client_timeout + 60
+
+
+def test_main_serves_with_the_allowlist_and_idle_timeout_of_its_environment(monkeypatch, capsys):
+    served = []
+
+    async def run(allow, idle_timeout):
+        served.append((allow, idle_timeout))
+
+    monkeypatch.setattr(proxy, "_run", run)
+    monkeypatch.setenv("EGRESS_ALLOW", "localhost:8443")
+    monkeypatch.setenv("EGRESS_IDLE_TIMEOUT", "720")
+    assert proxy.main() == 0
+    assert served == [(frozenset({"localhost:8443"}), 720.0)]
+    monkeypatch.setenv("EGRESS_IDLE_TIMEOUT", "soon")
+    assert proxy.main() == 2
+    assert served == [(frozenset({"localhost:8443"}), 720.0)]
+    assert "EGRESS_IDLE_TIMEOUT" in capsys.readouterr().err

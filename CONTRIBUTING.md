@@ -15,8 +15,12 @@ If you maintain one of the systems that v0.1 enters, you are invited to review i
 ```bash
 uv run --frozen --extra dev pytest
 ASOFBENCH_CLONES=../asofbench-clones uv run --frozen --extra dev pytest
+uv run --frozen --extra dev pytest systems/tests
+uv run --frozen --extra dev --with anthropic==0.111.0 --with httpx==0.28.1 python -m pytest systems/tests/test_llm_client.py
 uv run --frozen --extra dev ruff check src tests examples systems
 ```
+
+The third and fourth commands run the tests of `systems/` as CI does: first on the repository's own environment, where the tests of the systems' Anthropic client skip, and then those tests with the SDK and httpx at the versions that the Graphiti image's lock pins, through `python -m pytest`, whose interpreter sees the `--with` packages. The few that also need graphiti-core run inside the Graphiti image ([systems/graphiti/README.md](systems/graphiti/README.md#tests)). With `UV_OFFLINE=1` before a command, uv installs nothing from the network, which works once its cache holds what the command needs.
 
 `--extra dev` installs the test tools (pytest, pytest-cov and ruff), and `--frozen` installs them as uv.lock pins them. The unit tests build small git repositories of their own; the corpus tests, marked `corpus`, need `ASOFBENCH_CLONES` set to the directory that holds the three clones, and are skipped without it. With the clones, the suite takes five to ten minutes, depending on the machine. In code comments and docstrings, "spec" means PREREGISTRATION.md, so "spec section 9" is its section 9.
 

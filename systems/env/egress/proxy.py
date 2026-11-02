@@ -6,14 +6,21 @@ HTTP/1.x`` and for nothing else: the host is compared in lower case and the port
 allowlist, a host that is an IP address is refused even when it is the address an allowed name
 resolves to, and any other method, including an absolute-form ``GET http://...``, is refused
 before any connection is made. A tunnel carries bytes in both directions until either side closes
-it or neither side has sent anything for the idle timeout.
+it or neither side has sent anything for the idle timeout, which outlasts the client's own request
+timeout: a non-streaming request receives nothing until its response begins, so it ends at the
+client's timeout, never cut short by the proxy.
 
 Every request is logged as one JSON line on stdout, with the keys ``ts``, ``client``, ``method``,
 ``target``, ``allowed`` and ``reason``; nothing that passes through a tunnel is read or logged.
 
+Its limits: it relays TLS uninspected, so it checks the host and port of the CONNECT request and
+never the server name (SNI) that the client's TLS handshake sends inside the tunnel, which can
+therefore differ from the CONNECT host; and it has no cap on concurrent connections.
+
 Configuration: ``EGRESS_ALLOW``, a comma-separated list of ``host:port`` entries naming hosts by
-DNS name (default ``api.anthropic.com:443``). The proxy listens on 0.0.0.0:3128. It uses only the
-standard library.
+DNS name (default ``api.anthropic.com:443``), and ``EGRESS_IDLE_TIMEOUT``, the idle timeout in
+seconds (default 660, a minute longer than the 600 seconds that the systems' shared Anthropic
+client gives a request). The proxy listens on 0.0.0.0:3128. It uses only the standard library.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import math
 import os
 import re
 import signal
@@ -37,8 +45,10 @@ LISTEN_PORT = 3128
 HEAD_LIMIT = 16 * 1024
 # Seconds after which a connection is closed: when its request is not complete this long after it
 # opened, when the upstream connection is not made this long after it began, and when neither
-# side of a tunnel has sent anything for this long.
-IDLE_TIMEOUT = 300.0
+# side of a tunnel has sent anything for this long. The default outlasts the 600 seconds that
+# asofbench_systems.llm gives a request by a minute, since a non-streaming request receives
+# nothing until its response begins.
+DEFAULT_IDLE_TIMEOUT = 660.0
 CHUNK = 64 * 1024
 
 ESTABLISHED = b"HTTP/1.1 200 Connection established\r\n\r\n"
@@ -111,6 +121,22 @@ def allowlist(environ: Mapping[str, str] | None = None) -> frozenset[str]:
     return parse_allow(environ.get("EGRESS_ALLOW", DEFAULT_ALLOW))
 
 
+def idle_timeout(environ: Mapping[str, str] | None = None) -> float:
+    """The idle timeout in seconds from ``EGRESS_IDLE_TIMEOUT`` (default DEFAULT_IDLE_TIMEOUT);
+    ValueError unless it is a positive, finite number."""
+    environ = os.environ if environ is None else environ
+    text = environ.get("EGRESS_IDLE_TIMEOUT")
+    if text is None:
+        return DEFAULT_IDLE_TIMEOUT
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise ValueError(f"EGRESS_IDLE_TIMEOUT is {text!r}, not a positive number of seconds")
+    return seconds
+
+
 def decide(head: bytes, allow: frozenset[str]) -> Decision:
     """The decision for a request whose request line and header fields are ``head``, up to and
     including the blank line that ends them. Nothing here touches the network."""
@@ -159,7 +185,7 @@ def peer(writer: asyncio.StreamWriter) -> str:
 
 
 async def serve(allow: frozenset[str], host: str = LISTEN_HOST, port: int = LISTEN_PORT, *,
-                idle_timeout: float = IDLE_TIMEOUT) -> asyncio.Server:
+                idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> asyncio.Server:
     """Starts the proxy on ``host`` and ``port`` (0 picks a free port) and returns its server."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -249,25 +275,26 @@ async def _relay(client_reader: asyncio.StreamReader, client_writer: asyncio.Str
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _run(allow: frozenset[str]) -> None:
-    server = await serve(allow)
+async def _run(allow: frozenset[str], idle_timeout: float) -> None:
+    server = await serve(allow, idle_timeout=idle_timeout)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
     print(f"egress: listening on {LISTEN_HOST}:{LISTEN_PORT}, allowing "
-          f"{', '.join(sorted(allow))}", file=sys.stderr, flush=True)
+          f"{', '.join(sorted(allow))}, closing a connection idle for {idle_timeout:g} s",
+          file=sys.stderr, flush=True)
     await stop.wait()
     server.close()
 
 
 def main() -> int:
     try:
-        allow = allowlist()
+        allow, seconds = allowlist(), idle_timeout()
     except ValueError as error:
         print(f"egress: {error}", file=sys.stderr)
         return 2
-    asyncio.run(_run(allow))
+    asyncio.run(_run(allow, seconds))
     return 0
 
 

@@ -1,7 +1,13 @@
 """The Anthropic client that every adapter builds (common/asofbench_systems/llm.py), the log of
 each call's usage (common/asofbench_systems/usage.py), and Graphiti's AnthropicClient as the
 Graphiti adapter builds it. They need the anthropic package, and the last ones graphiti-core, so
-the root suite skips them; they run inside the Graphiti image, with no network at all:
+the root suite skips them. CI runs them with the SDK and httpx that the Graphiti image's lock pins,
+which skips the ones that need graphiti-core:
+
+    uv run --frozen --extra dev --with anthropic==0.111.0 --with httpx==0.28.1 \\
+        python -m pytest systems/tests/test_llm_client.py
+
+and all of them run inside the Graphiti image, with no network at all:
 
     docker run --rm --network none -v "$PWD/systems:/systems:ro" asofbench/graphiti \\
         python -m pytest -p no:cacheprovider /systems/tests/test_llm_client.py
@@ -14,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import socketserver
 import threading
@@ -28,6 +35,8 @@ from asofbench_systems import llm, usage  # noqa: E402
 
 KEY = "sk-ant-api00-made-up-for-tests-" + "0123456789" * 4
 MODEL = "claude-haiku-5-5"
+# A made-up dated snapshot id, as a response may name for the model alias a call asked for.
+SNAPSHOT = "claude-haiku-5-5-20990101"
 USAGE = {"input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 3,
          "cache_read_input_tokens": 5}
 ENVIRONMENT = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY",
@@ -264,7 +273,8 @@ def test_graphiti_s_embedder_asks_for_the_model_s_prompt_and_keeps_2048_floats(e
 def test_the_usage_log_records_each_response_under_the_current_episode(environment, key_file,
                                                                        tmp_path):
     path = tmp_path / "usage.jsonl"
-    recorder = Recorder((200, TEXT))
+    # The response names a dated snapshot of the model asked for, as an alias's answer can.
+    recorder = Recorder((200, {**TEXT, "model": SNAPSHOT}))
     client = usage.instrument(llm.make_async_client(
         key_file, transport=httpx.MockTransport(recorder)), usage.UsageLog(str(path)))
 
@@ -286,12 +296,13 @@ def test_the_usage_log_records_each_response_under_the_current_episode(environme
     assert [(line["context"], line["invocation"], line["attempt"]) for line in lines] == [
         ("0123456789ab:PEP-1", 2, 3)] * 3 + [("ba9876543210:EIP-2", None, None),
                                              (None, None, None)]
-    assert set(lines[0]) == {"ts", "context", "invocation", "attempt", "model", "input_tokens",
-                             "output_tokens", "cache_creation_input_tokens",
+    assert set(lines[0]) == {"ts", "context", "invocation", "attempt", "model", "response_model",
+                             "input_tokens", "output_tokens", "cache_creation_input_tokens",
                              "cache_read_input_tokens", "stop_reason", "error"}
     assert {key: lines[0][key] for key in USAGE} == USAGE
-    assert (lines[0]["model"], lines[0]["stop_reason"], lines[0]["error"]) == (
-        MODEL, "end_turn", None)
+    # Every line records the model the call asked for, and beside it the one the response named.
+    assert all((line["model"], line["response_model"]) == (MODEL, SNAPSHOT) for line in lines)
+    assert (lines[0]["stop_reason"], lines[0]["error"]) == ("end_turn", None)
     assert len(recorder.requests) == 5
 
 
@@ -339,7 +350,9 @@ def test_a_call_that_raises_is_recorded_with_its_class_only(environment, key_fil
                                    ("0123456789ab:PEP-1", 1, 1, "BadRequestError"),
                                    ("0123456789ab:PEP-1", 1, 1, None)]
     assert all(line[count] == 0 for line in lines[:2] for count in USAGE)
-    assert (lines[1]["model"], lines[1]["stop_reason"]) == (MODEL, None)
+    assert (lines[1]["model"], lines[1]["response_model"], lines[1]["stop_reason"]) == (
+        MODEL, None, None)
+    assert (lines[2]["model"], lines[2]["response_model"]) == (MODEL, MODEL)
     assert KEY not in text and "toy refusal" not in text
 
 
@@ -401,6 +414,9 @@ def test_the_key_is_in_no_usage_line_and_no_error(environment, key_file, tmp_pat
         assert KEY not in text
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [line["error"] for line in lines] == [None, "AuthenticationError"]
+    # A call that raised has the model it asked for and no response model.
+    assert [(line["model"], line["response_model"]) for line in lines] == [(MODEL, MODEL),
+                                                                          (MODEL, None)]
 
 
 def test_a_key_file_that_holds_no_key_is_refused_without_showing_it(tmp_path):
@@ -408,15 +424,26 @@ def test_a_key_file_that_holds_no_key_is_refused_without_showing_it(tmp_path):
     for content in ("", "\n", f"{secret}\nsecond line\n", f"{secret} with space\n"):
         path = tmp_path / "anthropic_api_key"
         path.write_text(content, encoding="utf-8")
-        with pytest.raises(ValueError) as caught:
+        with pytest.raises(llm.KeyFileError, match="does not hold an API key") as caught:
             llm.read_key(str(path))
         assert secret not in str(caught.value)
     path.write_bytes(b"sk-ant-\xe2\x80\x8bhidden\n")
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(llm.KeyFileError) as caught:
         llm.read_key(str(path))
     assert "hidden" not in str(caught.value)
-    with pytest.raises(FileNotFoundError):
-        llm.read_key(str(tmp_path / "missing"))
+    # A file that cannot be read is refused by name and reason, never as an OSError's traceback.
+    unreadable = tmp_path / "unreadable"
+    unreadable.write_text(f"{secret}\n", encoding="ascii")
+    unreadable.chmod(0)
+    cases = [(tmp_path / "missing", "No such file or directory"), (tmp_path, "Is a directory")]
+    if os.geteuid() != 0:  # root reads a file whatever its mode
+        cases.append((unreadable, "Permission denied"))
+    for path, why in cases:
+        with pytest.raises(llm.KeyFileError) as caught:
+            llm.read_key(str(path))
+        assert str(caught.value) == f"{path} cannot be read ({why})"
+        assert caught.value.__cause__ is None and secret not in str(caught.value)
+    assert issubclass(llm.KeyFileError, ValueError)
 
 
 def test_redact_removes_the_key_from_text(key_file):

@@ -128,9 +128,27 @@ def order(candidates: list[str]) -> list[str]:
         f"asof-bench/v0.1|distractor|{c}".encode()).hexdigest())
 
 
-def split(ingested: int = 0, failed: int = 0, stopped: int = 0, unknown: int = 0) -> dict:
-    """A summary's api_errors_by_outcome."""
-    return {"ingested": ingested, "failed": failed, "stopped": stopped, "unknown": unknown}
+def totals(input_tokens: int = 0, output_tokens: int = 0, calls: int = 0,
+           api_errors: int = 0) -> dict:
+    """The four totals that summary.json gives the lines of a set of calls."""
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "calls": calls,
+            "api_errors": api_errors}
+
+
+def split(ingested: dict | None = None, failed: dict | None = None, stopped: dict | None = None,
+          unknown: dict | None = None) -> dict:
+    """A summary's by_outcome: the totals of the attempts of each outcome (none when left out)."""
+    return {"ingested": ingested or totals(), "failed": failed or totals(),
+            "stopped": stopped or totals(), "unknown": unknown or totals()}
+
+
+def summed(by_outcome: dict) -> dict:
+    """The ingestion attempts' totals that a by_outcome split adds up to."""
+    return {name: sum(t[name] for t in by_outcome.values()) for name in totals()}
+
+
+# A dated snapshot id that a response may name for the model asked for (made up).
+SNAPSHOT = "claude-haiku-5-5-20990101"
 
 
 class World:
@@ -163,14 +181,15 @@ class World:
                                        {"questions.jsonl": self.questions}, basis, budget)
         input_sha256 = "1" * 64
         self.summary = tmp_path / "summary.json"
+        ingested = totals(10_000_000, 2_000_000, 40)
         self.summary.write_text(json.dumps(summary or {
             "arm": "H+", "stream": "m0-h-plus.jsonl", "stream_sha256": input_sha256,
-            "episodes": 4, "ok": 4, "failed": 0, "text_chars": 1000,
-            "input_tokens": 10_000_000, "output_tokens": 2_000_000, "calls": 40,
-            "api_errors": 0, "api_errors_by_outcome": split(), "calls_over_100k_input": 0,
-            "removal": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "api_errors": 0},
+            "episodes": 4, "ok": 4, "failed": 0, "text_chars": 1000, **ingested,
+            "by_outcome": split(ingested=ingested), "calls_over_100k_input": 0,
+            "removal": totals(), "unattributed": totals(),
             "wall_s": 120.0, "elapsed_s": 70.0, "exit": 0, "graphiti_core": "0.31.2",
-            "model": "claude-haiku-5-5"}), encoding="utf-8")
+            "model": "claude-haiku-5-5", "response_models": ["claude-haiku-5-5"]}),
+            encoding="utf-8")
         self.prepare = tmp_path / "prepare.json"
         self.prepare.write_text(json.dumps({
             "proposals": 2, "episodes": 4, "text_chars": 1000,
@@ -373,36 +392,141 @@ def test_project_refuses_a_run_that_did_not_reach_the_stream_s_end(tmp_path, cap
     assert world.project() == 0
 
 
+INGESTED = totals(10_000_000, 2_000_000, 40)
+
+
 def test_project_refuses_a_call_that_raised_inside_an_attempt_that_ingested_its_episode(
         tmp_path, capsys):
-    cases = [(split(ingested=1), 1, "1 of its calls that raised fell inside attempts that "
-                                    "ingested their episode. Graphiti caught those failures"),
-             (split(ingested=1, stopped=2), 3, "1 of its calls that raised fell inside attempts "
-                                               "that ingested their episode"),
-             (split(unknown=1), 1, "1 of its calls that raised fell in no attempt that its log "
-                                   "can place"),
-             # A split that does not add up, or lacks an outcome, or no split at all.
-             (split(stopped=1), 2, "does not split its calls that raised (api_errors: 2)"),
-             ({"stopped": 1}, 1, "does not split its calls that raised (api_errors: 1)"),
-             (None, 0, "does not split its calls that raised (api_errors: 0)")]
-    for index, (by_outcome, api_errors, message) in enumerate(cases):
+    raised = {**INGESTED, "api_errors": 1}
+    not_split = "does not split its ingestion attempts' totals by the outcome of their attempt"
+    stopped_one = split(ingested=INGESTED, stopped=totals(api_errors=1))
+    # Each case: the split, the summary's totals beside it, and what the refusal says.
+    cases = [(split(ingested=raised), summed(split(ingested=raised)),
+              "1 of its calls that raised fell inside attempts that ingested their episode. "
+              "Graphiti caught those failures"),
+             (split(ingested=raised, stopped=totals(api_errors=2)), {**INGESTED, "api_errors": 3},
+              "1 of its calls that raised fell inside attempts that ingested their episode"),
+             # Any line that no attempt can hold, a response or a call that raised: the rates
+             # cannot tell whether to count it.
+             (split(ingested=INGESTED, unknown=totals(api_errors=1)),
+              {**INGESTED, "api_errors": 1},
+              "1 of its usage lines fall in no attempt that its log can place"),
+             (split(ingested=INGESTED, unknown=totals(100, 10, 2)),
+              totals(10_000_100, 2_000_010, 42),
+              "2 of its usage lines fall in no attempt that its log can place"),
+             # A split that does not add up to the totals, lacks an outcome, holds a count that
+             # is not an integer, or no split at all.
+             (stopped_one, {**INGESTED, "api_errors": 2}, not_split),
+             ({"ingested": INGESTED}, INGESTED, not_split),
+             (split(ingested={**INGESTED, "calls": "40"}), INGESTED, not_split),
+             (None, INGESTED, not_split)]
+    for index, (by_outcome, summary_totals, message) in enumerate(cases):
         world = World(tmp_path / str(index), SMALL, named=["PEP-1"])
-        world.edit(world.summary, api_errors=api_errors, api_errors_by_outcome=by_outcome)
+        world.edit(world.summary, by_outcome=by_outcome, **summary_totals)
         assert world.project() == 2
         assert message in capsys.readouterr().err
         assert not world.out.exists()
 
 
-def test_project_reports_the_calls_that_raised_inside_failed_or_stopped_attempts(tmp_path):
-    # Those calls caused the attempt's failure or the run's stop, which the log and run.json
-    # record; the rates are projected from every attempt's tokens all the same.
+def test_project_takes_the_rates_from_the_attempts_that_ingested_or_failed_and_not_stopped(
+        tmp_path, capsys):
+    # A stopped attempt's work was discarded by the environment's failure, and a resume did it
+    # again: its tokens are reported apart and left out of the rates. A failed attempt's are
+    # Graphiti's own cost of the episode, and counted.
+    by_outcome = split(ingested=INGESTED, failed=totals(1_000_000, 100_000, 5, 1),
+                       stopped=totals(3_000_000, 300_000, 15, 2))
     world = World(tmp_path, SMALL, named=["PEP-1", "PEP-2"])
-    world.edit(world.summary, api_errors=3, api_errors_by_outcome=split(failed=1, stopped=2))
+    world.edit(world.summary, by_outcome=by_outcome, **summed(by_outcome))
+    assert world.project() == 0
+    projection = world.projection()
+    rates = projection["rates"]
+    assert (rates["in_per_char"], rates["out_per_char"]) == (11_000, 2_100)
+    assert rates["counted"] == {"outcomes": ["ingested", "failed"], "input_tokens": 11_000_000,
+                                "output_tokens": 2_100_000, "calls": 45, "text_chars": 1000}
+    assert rates["stopped"] == totals(3_000_000, 300_000, 15, 2)
+    assert "stopped" in rates["rule"] and "not counted" in rates["rule"]
+    assert projection["pilot"]["by_outcome"] == by_outcome
+    assert projection["pilot"]["api_errors"] == 3
+    # Each character of an ingestion costs 11,000 x $0.10/M + 2,100 x $0.50/M = $0.00215.
+    assert projection["total"]["cost_usd"] == pytest.approx(0.00215 * 120_000)
+    assert "stopped attempts" in capsys.readouterr().err
+
+
+def test_a_stopped_attempt_and_its_resume_give_the_rates_without_the_stopped_attempt(tmp_path):
+    from graphiti import ingest
+
+    # Four episodes of 250 characters, the 1,000 that prepare.json counts. The first invocation
+    # ingests three and stops in its attempt at the fourth, when the embedder goes away; the
+    # resumed invocation ingests the fourth in its own first attempt.
+    episodes = [{**episode(n, "PEP-1", "x" * 250), "episode_id": f"{n:012x}:PEP-1"}
+                for n in range(1, 5)]
+    ids = [e["episode_id"] for e in episodes]
+    log = [{"episode_id": e["episode_id"], "proposal": "PEP-1", "group_id": "pep",
+            "episode_uuid": f"u{n}", "ok": True, "error": None,
+            "started_at": "2026-11-01T00:00:00Z", "wall_s": 1.0, "text_chars": 250,
+            "attempts": 1, "invocation": 1 if n < 4 else 2} for n, e in enumerate(episodes, 1)]
+
+    def line(context: str, invocation: int, tokens_in: int, tokens_out: int,
+             error: str | None = None) -> dict:
+        return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "invocation": invocation,
+                "attempt": 1, "model": m0.MODEL, "response_model": None if error else SNAPSHOT,
+                "input_tokens": tokens_in, "output_tokens": tokens_out,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                "stop_reason": None if error else "tool_use", "error": error}
+
+    usage_lines = [*(line(ids[n], 1, 2_000_000, 400_000) for n in range(3)),
+                   line(ids[3], 1, 7_000_000, 900_000), line(ids[3], 1, 0, 0, "APIConnectionError"),
+                   line(ids[3], 2, 4_000_000, 800_000)]
+    images = {name: "sha256:" + "a" * 64 for name in ingest.IMAGE_NAMES}
+    record = {"arm": "H+", "stream": "m0-h-plus.jsonl", "stream_sha256": "1" * 64,
+              "invocations": [{"images": images, "elapsed_s": 50.0, "exit": 2},
+                              {"images": images, "elapsed_s": 20.0, "exit": 0}]}
+    summary = ingest.summarize(episodes, log, usage_lines, record, graphiti_core="0.31.2")
+    assert (summary["input_tokens"], summary["output_tokens"]) == (17_000_000, 2_900_000)
+    world = World(tmp_path, SMALL, named=["PEP-1", "PEP-2"], summary=summary)
+    assert world.project() == 0
+    projection = world.projection()
+    # 10,000,000 input and 2,000,000 output tokens over 1,000 characters: the stopped
+    # attempt's 7,000,000 and 900,000 are not counted.
+    assert (projection["rates"]["in_per_char"], projection["rates"]["out_per_char"]) == (
+        10_000, 2_000)
+    assert projection["rates"]["stopped"] == totals(7_000_000, 900_000, 1, 1)
+    assert projection["total"]["cost_usd"] == pytest.approx(240.0)
+    assert projection["pilot"]["response_models"] == [SNAPSHOT]
+
+
+def test_project_reports_unattributed_calls_and_refuses_one_that_raised(tmp_path, capsys):
+    world = World(tmp_path / "calls", SMALL, named=["PEP-1", "PEP-2"])
+    world.edit(world.summary, unattributed=totals(700, 70, 3))
+    assert world.project() == 0
+    projection = world.projection()
+    assert projection["pilot"]["unattributed"] == totals(700, 70, 3)
+    # Like the removal's calls, they are no ingestion attempt's, and the rates leave them out.
+    assert projection["rates"]["in_per_char"] == 10_000
+    for index, unattributed in enumerate((totals(api_errors=1), totals(700, 70, 3, 2))):
+        world = World(tmp_path / str(index), SMALL, named=["PEP-1"])
+        world.edit(world.summary, unattributed=unattributed)
+        assert world.project() == 2
+        assert (f"{unattributed['api_errors']} of its calls that raised are attributed to no "
+                "episode and no removal") in capsys.readouterr().err
+        assert not world.out.exists()
+    for index, unattributed in enumerate((None, {"calls": 0}, totals(calls=-1))):
+        world = World(tmp_path / f"bad-{index}", SMALL, named=["PEP-1"])
+        world.edit(world.summary, unattributed=unattributed)
+        assert world.project() == 2
+        assert "does not count the calls that it attributes to no episode" in (
+            capsys.readouterr().err)
+
+
+def test_project_checks_the_model_asked_for_and_reports_the_ids_the_responses_named(
+        tmp_path, capsys):
+    # The responses may name a dated snapshot of the model asked for: reported, not refused.
+    world = World(tmp_path, SMALL, named=["PEP-1", "PEP-2"])
+    world.edit(world.summary, response_models=[SNAPSHOT])
     assert world.project() == 0
     pilot = world.projection()["pilot"]
-    assert (pilot["api_errors"], pilot["api_errors_by_outcome"]) == (
-        3, split(failed=1, stopped=2))
-    assert world.projection()["total"]["cost_usd"] == pytest.approx(240.0)
+    assert (pilot["model"], pilot["response_models"]) == (m0.MODEL, [SNAPSHOT])
+    assert SNAPSHOT in capsys.readouterr().err
 
 
 def test_m0_splits_the_calls_that_raised_by_the_outcomes_that_ingest_gives():

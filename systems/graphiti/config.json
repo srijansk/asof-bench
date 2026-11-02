@@ -17,7 +17,7 @@
     "uri": "bolt://neo4j:7687",
     "auth": "none (NEO4J_AUTH=none); Neo4j is on the internal network only",
     "memory": {"heap_initial": "256m", "heap_max": "512m", "pagecache": "128m", "mem_limit": "1536m"},
-    "memory_note": "the container limit is 1.5 GiB, with the heap and the page cache as they were: at 1 GiB the JVM's native memory reached the limit within minutes of each restart once the store held about 900 episodes, and Neo4j restarted during a commit; M0's store of 1,441 episodes took about 1.2 GiB. A larger store needs more, which is sized before the pilot",
+    "memory_note": "the container limit is 1.5 GiB, with the heap and the page cache as they were: at 1 GiB M0's Neo4j read up to 972 MiB, well beyond its heap and page cache, and restarted during a commit once the store held about 900 episodes; at 1.5 GiB it read 1.20 GiB with 1,117 episodes logged, as results/m0 records (the operator's docker stats readings, snapshots and not peaks). A larger store needs more, which is sized before the pilot",
     "usage_report": false,
     "restart": "unless-stopped: a Neo4j that stops is restarted, and the ingestion run it interrupted stops with exit status 2, to be resumed",
     "store": "one named volume per run (the compose project's neo4j-data), so that each arm has its own store and arms never share one"
@@ -49,7 +49,7 @@
     "dimensions_parameter": "not sent: OpenAIEmbedder asks for the model's own 2048 dimensions and keeps the first embedding_dim (2048) of them",
     "server": "env/embedder (asofbench/embedder): voyage-4-nano on the CPU in bfloat16, the dtype its weights are published in, behind an OpenAI-compatible endpoint, returning each vector in float32",
     "memory": {"mem_limit": "2560m", "environment": {"MALLOC_ARENA_MAX": "2", "MALLOC_MMAP_THRESHOLD_": "131072", "MALLOC_TRIM_THRESHOLD_": "131072"}},
-    "memory_note": "the server's glibc allocator settings (two arenas, and a fixed 128 KiB mmap and trim threshold) change its memory use and nothing it computes: the model, its weights, its dtype and every vector are the same with or without them. Without them the server grew to about 1.5 GiB in 30-40 minutes of ingestion; with them M0's server stayed near 0.5-0.6 GiB",
+    "memory_note": "the server's glibc allocator settings (two arenas, and a fixed 128 KiB mmap and trim threshold) change its memory use and nothing it computes: the model, its weights, its dtype and every vector are the same with or without them. Without them M0's server read up to 1.48 GiB, and it was ended and restarted twice, most likely by the Docker VM's out-of-memory killer; with them it read 491 to 593 MiB, as results/m0 records (the operator's docker stats readings, snapshots and not peaks)",
     "model": {
       "id": "voyageai/voyage-4-nano",
       "revision": "5fb34e870f49f19e79c94d5e118f5ee730133279",

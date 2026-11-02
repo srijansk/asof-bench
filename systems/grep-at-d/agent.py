@@ -13,7 +13,9 @@ key, its usage log and its stops hold for it as for the single-call entrants:
 One run answers the requests of one arm and date, whose tree run_dates.py builds on the host and
 the sandbox holds, read-only, at /repo (systems/README.md); run_dates.py gives each run the count
 of ``api_error`` responses in a row that the dates before it ended with (``--api-errors-before``),
-so that the runner's stop after five in a row spans the dates.
+so that the runner's stop after five in a row spans the dates. A request holds the question
+alone, and the runner refuses a requests file whose lines hold a context, another entrant's,
+before it answers anything, with exit status 2 (``main``).
 
 **The loop** (``answer_with_commands``). The first turn is the question, ``Question: {question}``,
 as a single-call entrant's is when it has no context. Every turn is an answering call with the
@@ -204,7 +206,8 @@ async def answer_with_commands(client, model: str, question: str, context: str |
     """One request's answer (the module's description), through ``client`` (as the runner opens
     it) and ``sandbox`` (a ``Sandbox``); what it returns is ``answer_once``'s fields, and it raises
     what ``answer_once`` raises and ``SandboxUnavailable``. ValueError for a request with a
-    context, which is another entrant's."""
+    context, which is another entrant's; ``main``'s runner refuses a requests file that holds one
+    before it answers anything, so this guards only a call made otherwise."""
     import anthropic
 
     if context is not None:
@@ -339,10 +342,12 @@ def self_test() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """``grep_at_d``: the reader's runner, with grep at D's answering function, images, network
-    check and self-test."""
+    check and self-test, and its requests without a context: a requests file whose lines hold one
+    is another entrant's, and the runner refuses it before anything is answered."""
     ask = functools.partial(answer_with_commands, sandbox=Sandbox())
     return answer_requests.main(argv, prog="grep_at_d", ask=ask, image_names=IMAGE_NAMES,
-                                preflight=netcheck_preflight, self_test=self_test)
+                                preflight=netcheck_preflight, self_test=self_test,
+                                takes_context=False)
 
 
 if __name__ == "__main__":

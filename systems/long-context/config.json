@@ -103,7 +103,7 @@
     "null_answer": "a request that was not answered has a response with a null answer and its error code, and its row has a null answer, which scores zero (section 12)"
   },
   "shaping": "the harness shapes each answer by the item's answer_type and does nothing else to it: for status, a string is kept, an integer becomes its decimal string, and anything else is kept as it came; for set, a list is kept, a string that parses as a JSON list is replaced by that list, and anything else is kept as it came; for count, an integer is kept, a string of ASCII digits with an optional leading minus sign is replaced by its integer, and anything else is kept as it came. A boolean is no integer. The scorer normalises the rest",
-  "rows": "harness.py rows writes one row per request, in keys.jsonl's order, with exactly the nine fields of section 12: id, system, arm, run, answer, tokens_in, tokens_out, wall_s and tool_calls; a key with no response, which a run that stopped and was not resumed leaves, gets a null answer and null costs, and rows exits 1",
+  "rows": "harness.py rows writes one row per request, in keys.jsonl's order, with exactly the nine fields of section 12: id, system, arm, run, answer, tokens_in, tokens_out, wall_s and tool_calls; a key with no response, which a run that stopped and was not resumed leaves, gets a null answer and null costs, and rows exits 1; so does a run whose last invocation stopped with exit status 3, whether or not every key has a response: rows writes its rows and says to discard the run and run it again in a fresh run directory",
   "run": {
     "concurrency": 8,
     "max_retries": 8,

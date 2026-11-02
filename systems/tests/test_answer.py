@@ -2,10 +2,12 @@
 request it sends, field by field, and how it reads the reply; the reader's run
 (reader/answer_requests.py) through the real client; and the image's self-test
 (reader/selftest.py) on this SDK. They need the anthropic package, so the root suite skips them.
-CI runs them with the SDK and httpx that the reader image's lock pins:
+CI runs them with the SDK and httpx that the reader image's lock pins, with the shared client's
+tests and grep at D's agent loop:
 
     uv run --frozen --extra dev --with anthropic==0.78.0 --with httpx==0.28.1 \\
-        python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py
+        python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py \\
+        systems/tests/test_grep_agent.py
 
 and they run inside the reader image, with no network at all:
 

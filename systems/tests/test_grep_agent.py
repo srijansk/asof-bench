@@ -409,6 +409,34 @@ def test_grep_at_d_s_images_are_its_own_the_reader_s_the_proxy_s_and_the_sandbox
     assert list((tmp_path / "output").iterdir()) == []
 
 
+def test_grep_at_d_s_command_refuses_a_requests_file_with_a_context_before_answering(tmp_path,
+                                                                                   monkeypatch,
+                                                                                   capsys):
+    # A requests file whose lines hold a context is another entrant's: grep at D's command
+    # refuses it when it reads the file, with exit status 2, before the network check and before
+    # any request is answered or anything is written; the reader's command takes the same file.
+    (tmp_path / "input").mkdir()
+    (tmp_path / "output").mkdir()
+    lines = [{"key": str(uuid.uuid4()), "question": QUESTION},
+             {"key": str(uuid.uuid4()), "question": QUESTION, "context": "Another entrant's."}]
+    requests = tmp_path / "input" / "requests.jsonl"
+    requests.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    checked = []
+    # The key file is the Docker secret's, which a test's host has not mounted, and the network
+    # check would wait for the proxy: neither may be reached before the refusal.
+    monkeypatch.setattr(plumbing, "check_key_file", lambda key_file, readme: None)
+    monkeypatch.setattr(agent, "netcheck_preflight", lambda out_dir: checked.append(out_dir) or 1)
+    monkeypatch.setenv("ASOFBENCH_IMAGE_IDS", ",".join(f"{name}={image}"
+                                                       for name, image in IMAGES.items()))
+    assert agent.main(["--requests", str(requests), "--out",
+                       str(tmp_path / "output" / "responses.jsonl"),
+                       "--model", MODEL]) == plumbing.EXIT_STOPPED
+    assert ("grep_at_d: requests.jsonl: line 2 holds a context, which this entrant's requests "
+            "never hold: the requests file is another entrant's") in capsys.readouterr().err
+    assert checked == [] and list((tmp_path / "output").iterdir()) == []
+    assert answer_requests.scan_requests(requests) == [line["key"] for line in lines]
+
+
 # --- the loop, through the pinned SDK with a mocked API ------------------------------------------
 
 

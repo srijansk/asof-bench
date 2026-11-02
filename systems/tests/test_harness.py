@@ -337,13 +337,43 @@ def test_the_hint_for_a_key_with_no_response_depends_on_how_the_run_stopped(toy,
     assert "never resume it" in said
 
 
-def test_rows_refuses_responses_it_cannot_place(toy, tmp_path):
+def test_rows_say_to_discard_a_run_stopped_with_exit_3_even_when_every_key_has_a_response(
+        toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    # The fifth api_error response in a row fell on the run's last request: every key has a
+    # response, and the run's last invocation stopped with exit status 3. The rows are written,
+    # but the run is discarded all the same.
+    respond(run_dir, dict.fromkeys(keys, "Draft"),
+            invocations=[{"command": "answer", "exit": 3}])
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out) == 1 and len(lines(out)) == len(keys)
+    said = capsys.readouterr().err
+    assert "every key has a response, but the run stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
+    # With every key answered and a last invocation that did not stop so, rows says nothing.
+    respond(run_dir, dict.fromkeys(keys, "Draft"),
+            invocations=[{"command": "answer", "exit": 2}, {"command": "answer", "exit": 0}])
+    out.unlink()
+    assert make_rows(run_dir, out) == 0 and capsys.readouterr().err == ""
+
+
+def test_rows_refuses_responses_it_cannot_place(toy, tmp_path, capsys):
     run_dir = tmp_path / "run"
     assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
     keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
     out = tmp_path / "answers.jsonl"
     # The reader has not run: no run.json in the output directory.
     assert make_rows(run_dir, out) == 2 and not out.exists()
+    # A run.json that names no file of the output directory as the responses: a path, a name
+    # that is no file's, or none (asofbench_systems.answer.responses_name).
+    for name in ("../keys.jsonl", "sub/responses.jsonl", "/etc/passwd", "..", ".", "", None, 7):
+        respond(run_dir, dict.fromkeys(keys, "Draft"), responses=name)
+        capsys.readouterr()
+        assert make_rows(run_dir, out) == 2 and not out.exists(), name
+        assert "output/run.json names no responses file in output/" in capsys.readouterr().err
     # Responses to another requests file.
     respond(run_dir, dict.fromkeys(keys, "Draft"), requests_sha256="0" * 64)
     assert make_rows(run_dir, out) == 2 and not out.exists()
@@ -724,6 +754,25 @@ def test_grep_at_d_s_hint_after_a_date_stopped_by_api_errors_is_to_discard_the_r
     said = capsys.readouterr().err
     assert f"{dates[1]} stopped with exit status 3" in said
     assert "discard the run and run it again in a fresh run directory" in said
+
+
+def test_grep_at_d_s_rows_say_to_discard_the_run_after_a_stop_with_exit_3_with_every_key_answered(
+        toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    dates = sorted(json.loads((run_dir / "dates.json").read_text(encoding="utf-8")))
+    # The fifth api_error response in a row fell on the last date's last request: every date has
+    # run and every key has a response, but the last date's run stopped with exit status 3, so
+    # the whole run is discarded.
+    respond_dated(run_dir, lambda key: "Draft",
+                  invocations={dates[-1]: [{"command": "answer", "exit": 3}]})
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out, system="grep-at-d") == 1
+    assert len(lines(out)) == len(lines(run_dir / "keys.jsonl"))
+    said = capsys.readouterr().err
+    assert f"every key has a response, but {dates[-1]} stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
 
 
 def test_grep_at_d_s_rows_refuse_responses_they_cannot_place(toy, tmp_path):

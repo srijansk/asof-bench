@@ -77,26 +77,31 @@ stream the harness refuses leaves nothing behind. A context begins with a descri
         --out <answers.jsonl>
 
 reads the run directory's plan.json and keys.jsonl and the container's run.json and responses in
-``output/`` (``asofbench_systems.answer.responses_by_key``; for grep at D, in each date's
-``output/<file>/``, after checking dates.json and each date's requests file against plan.json and
-each response against its date's keys), and writes, atomically, one answer
-row per key, in keys.jsonl's order, with the nine fields of section 12 and no other: ``id``,
-``system``, ``arm``, ``run``, ``answer``, ``tokens_in``, ``tokens_out``, ``wall_s`` and
-``tool_calls``. The answer is shaped by the item's answer type and nothing else is done to it
-(``shape``). A request that the system could not answer has a response with a null answer, and so
-has its row. A key with no response at all, which a run that stopped and was not resumed leaves,
-gets a row with a null answer and null cost fields, which scores zero, and rows says how many and
-exits 1: after a stop with exit status 2 (or 4) resume the run first, and after one with exit
-status 3 (``api_error`` responses in a row) discard it and run it again in a fresh run directory,
-never resuming it; for grep at D, a date that has not run, or stopped, is resumed by running
-run_dates.py again, and a date that stopped with status 3 means that the whole run is discarded.
+``output/`` (``asofbench_systems.answer.responses_by_key``, from the file that run.json names,
+``asofbench_systems.answer.responses_name``; for grep at D, in each date's ``output/<file>/``,
+after checking dates.json and each date's requests file against plan.json and each response
+against its date's keys), and writes, atomically, one answer row per key, in keys.jsonl's order,
+with the nine fields of section 12 and no other: ``id``, ``system``, ``arm``, ``run``,
+``answer``, ``tokens_in``, ``tokens_out``, ``wall_s`` and ``tool_calls``. The answer is shaped by
+the item's answer type and nothing else is done to it (``shape``). A request that the system
+could not answer has a response with a null answer, and so has its row. A key with no response at
+all, which a run that stopped and was not resumed leaves, gets a row with a null answer and null
+cost fields, which scores zero, and rows says how many and exits 1: after a stop with exit status
+2 (or 4) resume the run first, and after one with exit status 3 (``api_error`` responses in a
+row) discard it and run it again in a fresh run directory, never resuming it; for grep at D, a
+date that has not run, or stopped, is resumed by running run_dates.py again, and a date that
+stopped with status 3 means that the whole run is discarded. A run whose last invocation stopped
+with exit status 3 (for grep at D, a run with a date whose last invocation did) makes rows say to
+discard it and exit 1 even when every key has a response, since the fifth ``api_error`` in a row
+can fall on the run's last request: its rows are written, and they are not to be scored.
 ``--system`` is the name the rows carry, the system that the requests were written for or an
 outside entry's name, such as a toy run's, that no registered system has.
 
 Exit status: 0 when the requests, or the rows, are written; 1 when rows wrote rows for keys with
-no response; 2, with the reason, when an input is refused (one that cannot be read among them),
-and then nothing is written; 4, with the traceback, for an error that no rule expects, so that no
-failure exits with a status that means something else.
+no response, or for a run that stopped with exit status 3; 2, with the reason, when an input is
+refused (one that cannot be read among them), and then nothing is written; 4, with the
+traceback, for an error that no rule expects, so that no failure exits with a status that means
+something else.
 
 It uses the standard library and the asofbench package, and puts systems/common on the import
 path, since nothing installs ``asofbench_systems`` on the host.
@@ -665,9 +670,7 @@ def read_responses(output: Path, requests_sha256: str | None, keys: set[str],
     if record.get("requests_sha256") != requests_sha256:
         raise Refused(f"the responses in {where}/ answer another requests file: its SHA-256 is "
                       f"{record.get('requests_sha256')}, this run's {requests_sha256}")
-    name = record.get("responses")
-    if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
-        raise Refused(f"{where}/{RUN} names no responses file in {where}/")
+    name = answer.responses_name(record, where)
     lines = read_input(read_jsonl, output / name)
     label = name if where == OUTPUT else f"{where}/{name}"
     return answer.responses_by_key(lines, keys, label), record
@@ -748,31 +751,32 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
     print(f"harness.py rows: {len(rows)} rows for {system} in {out}, answered by "
           f"{', '.join(models)}: {len(rows) - missing - unanswered} with an answer, "
           f"{unanswered} that the system could not answer, {missing} with no response")
+    # A run whose last invocation stopped with exit status 3 (for grep at D, a date's run whose
+    # last invocation did): each api_error response is its request's own and stays, but
+    # api_error responses in a row point at a cause that every request shares, so the run is
+    # discarded, never resumed under changed settings, and never scored, whether or not the stop
+    # left a key without a response (the fifth can fall on the run's last request).
     stopped = [name for name, record in records.items()
                if record is not None and last_exit(record) == EXIT_FAILURES]
+    discard = (f"{', '.join(stopped) if dated else 'the run'} stopped with exit status "
+               f"{EXIT_FAILURES} (api_error responses in a row, which point at a cause that every "
+               "request shares): discard the run and run it again in a fresh run directory once "
+               "the cause is fixed; never resume it (systems/README.md)")
     if missing:
-        if dated and stopped:
-            next_step = (f"{', '.join(stopped)} stopped with exit status {EXIT_FAILURES} "
-                         "(api_error responses in a row, which point at a cause that every "
-                         "request shares): discard the run and run it again in a fresh run "
-                         "directory once the cause is fixed; never resume it (systems/README.md)")
+        if stopped:
+            next_step = discard
         elif dated:
             next_step = ("a date has not run, or stopped before it answered them: run "
                          "grep-at-d/run_dates.py again, which resumes it, then write the rows "
                          "again")
-        elif stopped:
-            # Each api_error response is its request's own and stays, but api_error responses in
-            # a row point at a cause that every request shares: the run is discarded, never
-            # resumed under changed settings.
-            next_step = (f"the run stopped with exit status {EXIT_FAILURES} (api_error responses "
-                         "in a row, which point at a cause that every request shares): discard "
-                         "the run and run it again in a fresh run directory once the cause is "
-                         "fixed; never resume it (systems/README.md)")
         else:
             next_step = ("the run stopped before it answered them; resume it, then write the "
                          "rows again")
         print(f"harness.py rows: {missing} of the {len(rows)} keys have no response, so their "
               f"rows have a null answer, which scores zero: {next_step}", file=sys.stderr)
+        return EXIT_FAILED
+    if stopped:
+        print(f"harness.py rows: every key has a response, but {discard}", file=sys.stderr)
         return EXIT_FAILED
     return EXIT_DONE
 

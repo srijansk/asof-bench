@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ from asofbench_systems import run as plumbing  # noqa: E402
 from reader import answer_requests  # noqa: E402
 
 from asofbench import cli  # noqa: E402
+from asofbench.manifest import registered_stream  # noqa: E402
 
 run_dates = grep_modules.run_dates()
 
@@ -256,6 +258,74 @@ def test_each_date_s_tree_is_built_for_it_used_for_its_requests_alone_and_delete
                          "--out", str(out)]) == 0
 
 
+def test_each_date_s_tree_is_recorded_on_the_host_with_the_stream_it_was_built_from(setup):
+    compose = environment(setup)
+    assert go(setup, compose) == 0
+    run_dir, dates = setup["run_dir"], setup["dates"]
+    manifest_path = setup["world"] / "toy-data" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = json.loads((run_dir / run_dates.TREES).read_text(encoding="utf-8"))
+    # One entry for each date, in dates.json's order: its arm and date, and the one tree built
+    # for it, with the name of the stream it was built from and that stream's SHA-256, which is
+    # the one that the build's manifest registers for the arm.
+    assert run_dates.TREES == "trees.json" and list(record) == list(dates)
+    digests = set()
+    for name, entry in dates.items():
+        assert list(record[name]) == ["arm", "as_of", "trees"]
+        assert (record[name]["arm"], record[name]["as_of"]) == (entry["arm"], entry["as_of"])
+        (tree,) = record[name]["trees"]
+        assert list(tree) == ["built_at", "stream", "stream_sha256"]
+        stream = setup["world"] / "streams" / harness.STREAM_FILES[entry["arm"]]
+        assert tree["stream"] == stream.name
+        assert tree["stream_sha256"] == hashlib.sha256(stream.read_bytes()).hexdigest() == (
+            registered_stream(manifest, entry["arm"], manifest_path)["sha256"])
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", tree["built_at"])
+        digests.add(tree["stream_sha256"].encode())
+    # The record stays on the host: no run was given the run directory itself, and nothing that
+    # a run was given (its date's input and output directories, its tree) holds the record or a
+    # stream's SHA-256.
+    runs = [env for env, (_, command, _) in zip(compose.environments, compose.commands,
+                                                 strict=True) if command == "run"]
+    for env in runs:
+        for variable in ("ASOFBENCH_RUN_INPUT", "ASOFBENCH_RUN_OUTPUT", "ASOFBENCH_RUN_TREE"):
+            assert Path(env[variable]).resolve() != run_dir.resolve(), variable
+    given = [path for directory in (run_dir / "input", run_dir / "output")
+             for path in directory.rglob("*") if path.is_file()]
+    assert given and run_dates.TREES not in {path.name for path in given}
+    for path in given:
+        assert not any(digest in path.read_bytes() for digest in digests), path
+    for name in dates:
+        _, held, _ = compose.trees[name]
+        assert run_dates.TREES not in held
+        assert not any(digest in content for content in held.values() for digest in digests)
+
+
+def test_a_stream_that_changes_while_its_tree_is_built_gets_the_tree_deleted_and_no_run(
+        setup, tmp_path, monkeypatch):
+    # materialize checks the stream before it reads it; a stream that is no longer the registered
+    # one once the tree is built gets the tree deleted and its date not run, and trees.json
+    # records no tree for it.
+    streams = tmp_path / "streams"
+    shutil.copytree(setup["world"] / "streams", streams)
+    first = next(iter(setup["dates"].values()))
+    materialize = cli.main
+
+    def changing(argv: list[str]) -> int:
+        code = materialize(argv)
+        with open(streams / harness.STREAM_FILES[first["arm"]], "a", encoding="utf-8") as handle:
+            handle.write("\n")
+        return code
+
+    monkeypatch.setattr(cli, "main", changing)
+    compose, lines = environment(setup), []
+    assert go(setup, compose, streams_dir=streams, progress=lines.append) == plumbing.EXIT_STOPPED
+    assert compose.commands == [] and list(setup["trees"].iterdir()) == []
+    assert not (setup["run_dir"] / run_dates.TREES).exists()
+    assert not (setup["run_dir"] / "run.lock").exists()
+    assert any("after its tree was built" in line and "that the build registers" in line
+               for line in lines)
+
+
 def test_five_api_errors_in_a_row_across_dates_stop_the_run_with_exit_status_3(setup):
     names = list(setup["dates"])
     lines = []
@@ -318,9 +388,14 @@ def test_a_stopped_date_stops_the_run_and_the_next_run_resumes_it(setup):
     (resumed,) = [arguments for name, command, arguments in second.commands
                   if command == "run" and name == stopped]
     assert resumed[-1] == "--resume"
-    # The resumed date's second proxy log is kept beside its first.
+    # The resumed date's second proxy log is kept beside its first, and its second tree is
+    # recorded after its first, from the same stream.
     output = setup["run_dir"] / "output" / stopped
     assert (output / "egress.log").exists() and (output / "egress-1.log").exists()
+    record = json.loads((setup["run_dir"] / run_dates.TREES).read_text(encoding="utf-8"))
+    assert {name: len(entry["trees"]) for name, entry in record.items()} == {
+        name: 2 if name == stopped else 1 for name in names}
+    assert len({tree["stream_sha256"] for tree in record[stopped]["trees"]}) == 1
     # A third run has nothing left to do.
     third = environment(setup)
     assert go(setup, third) == 0 and third.commands == []
@@ -488,6 +563,24 @@ def test_a_tree_whose_build_fails_or_is_stopped_by_a_sigterm_is_deleted(setup, m
     monkeypatch.setattr(cli, "main", materialize)
     resumed = environment(setup)
     assert go(setup, resumed) == 0 and resumed.runs() == list(setup["dates"])
+
+
+def test_a_done_date_whose_run_json_names_no_responses_file_of_its_own_is_refused(setup):
+    # The count of api_error responses is carried from the responses that a done date's run.json
+    # names, which must be a file of the date's output directory (answer.responses_name).
+    assert go(setup, environment(setup)) == 0
+    name = next(iter(setup["dates"]))
+    path = setup["run_dir"] / "output" / name / "run.json"
+    kept = path.read_text(encoding="utf-8")
+    for bad in ("../../keys.jsonl", "..", "", None):
+        path.write_text(json.dumps({**json.loads(kept), "responses": bad}), encoding="utf-8")
+        compose = environment(setup)
+        with pytest.raises(run_dates.Refused,
+                           match=rf"^output/{name}/run\.json names no responses file in "):
+            go(setup, compose)
+        assert compose.commands == [] and not (setup["run_dir"] / "run.lock").exists()
+    path.write_text(kept, encoding="utf-8")
+    assert go(setup, environment(setup)) == 0
 
 
 def test_a_second_invocation_is_refused_while_one_holds_the_run_directory_s_lock(setup):

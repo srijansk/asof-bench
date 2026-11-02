@@ -38,7 +38,9 @@ answer.
 
 The reader writes one response per request, ``RESPONSE_FIELDS``: the request's key, then what
 ``answer_once`` returns; ``responses_by_key`` reads a run's responses back, for the reader when it
-resumes and for the harness when it writes the rows.
+resumes and for the harness when it writes the rows, and ``responses_name`` checks the name of
+the responses file that a run's run.json gives, for the harness and for grep at D's run_dates.py,
+which open that file.
 
 ``anthropic`` is imported only inside ``answer_once``, so the module imports where the SDK is not
 installed.
@@ -50,8 +52,9 @@ import copy
 import json
 import time
 from collections.abc import Collection
+from pathlib import Path
 
-from asofbench_systems.run import INFRASTRUCTURE, Refused, infrastructure_error
+from asofbench_systems.run import INFRASTRUCTURE, RUN, Refused, infrastructure_error
 
 # The answering models (section 11): claude-haiku-5-5 answers in every run, and claude-sonnet-5-5
 # again on the pilot items as the sensitivity check, each run with one of them.
@@ -172,3 +175,14 @@ def responses_by_key(responses: list[dict], keys: Collection[str], name: str) ->
             raise Refused(f"{name}: line {number} answers a key that has a response already")
         found[response["key"]] = response
     return found
+
+
+def responses_name(record: dict, where: str) -> str:
+    """The name of the responses file that a run's run.json, ``record``, gives, a file of the
+    run's output directory, ``where`` (which the refusal names); Refused for anything else, a
+    path or ``..`` among them, so that a reader of the responses never opens a file outside that
+    directory."""
+    name = record.get("responses")
+    if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
+        raise Refused(f"{where}/{RUN} names no responses file in {where}/")
+    return name

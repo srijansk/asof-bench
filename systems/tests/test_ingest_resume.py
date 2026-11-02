@@ -723,6 +723,26 @@ def test_a_crash_is_recorded_in_run_json_as_exit_4(tmp_path, monkeypatch, capsys
     assert "crashed (RuntimeError)" in capsys.readouterr().err
 
 
+def test_a_crash_inside_a_group_is_recorded_with_the_class_of_the_group_s_exception(tmp_path,
+                                                                                   monkeypatch):
+    # An exception that escapes a group's worker, here the write of the ingest log on a full
+    # disk, reaches the invocation inside the group of one that the groups' TaskGroup raises:
+    # run.json records the class of that exception, and the invocation unwinds as at any crash.
+    harness = Harness(tmp_path, [episode(1, kind="create")])
+
+    def full_disk(path, line):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(ingest, "append_line", full_disk)
+    with pytest.raises(ExceptionGroup) as caught:
+        harness.run(resume=False)
+    assert [type(error) for error in caught.value.exceptions] == [OSError]
+    (crash,) = harness.record()["invocations"]
+    assert (crash["exit"], crash["crash"]) == (ingest.EXIT_CRASHED, "OSError")
+    assert crash["elapsed_s"] is not None and harness.engines[0].closed
+    assert not (harness.out / "run.lock").exists()
+
+
 def test_run_json_records_each_invocation_with_the_fields_and_the_order_it_always_had(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     ids = [e["episode_id"] for e in episodes]

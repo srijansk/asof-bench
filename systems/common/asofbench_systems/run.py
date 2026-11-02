@@ -25,8 +25,10 @@
 
 An invocation's record in run.json is, in this order, ``command``, ``started_at``, the command's
 own fields, ``images`` (the image IDs it ran with), ``elapsed_s``, ``exit``, ``stop`` (what
-stopped it, as ``Stop`` holds it) and ``crash`` (the class of the exception that crashed it),
-the last four null until they are known.
+stopped it, as ``Stop`` holds it) and ``crash`` (the class of the exception that crashed it, as
+``crash_class`` names it: for a group that holds one exception, such as the group of one that
+``asyncio.TaskGroup`` raises when one worker fails, that exception's), the last four null until
+they are known.
 
 Exit status, the same for every runner that shares this module: EXIT_DONE, 0, when the run did
 all its work; EXIT_FAILED, 1, when the run reached the end of its work with a unit logged as
@@ -381,6 +383,17 @@ def netcheck_preflight(out_dir: Path, *, script: Path, args: Sequence[str],
     return done.returncode
 
 
+def crash_class(error: BaseException) -> str:
+    """The class of the exception that crashed an invocation, as run.json records it: for an
+    exception group that holds exactly one exception, the class of that one, a group of one
+    inside it unwrapped in turn, since a worker's exception reaches the invocation inside the
+    group of one that ``asyncio.TaskGroup`` raises (the traceback shows the group); for a group
+    of several, the group's own class."""
+    while isinstance(error, BaseExceptionGroup) and len(error.exceptions) == 1:
+        error = error.exceptions[0]
+    return type(error).__name__
+
+
 def new_invocation(command: str, images: Mapping[str, str], **fields) -> dict:
     """An invocation's record for run.json (the module's description): its ``command`` and the
     time it starts, now, then the command's own ``fields`` in the order given, a copy of
@@ -393,7 +406,7 @@ def new_invocation(command: str, images: Mapping[str, str], **fields) -> dict:
 def recorded(record: dict, invocation: dict, run_path: Path, begun: float) -> Iterator[None]:
     """Records ``invocation`` in run.json at once, and again at the end with its elapsed time
     and, unless the body set it, its exit status: 2 for a refusal, 4 with the exception's class
-    for a crash."""
+    (``crash_class``) for a crash."""
     record["invocations"].append(invocation)
     write_json(run_path, record)
     try:
@@ -403,7 +416,7 @@ def recorded(record: dict, invocation: dict, run_path: Path, begun: float) -> It
             invocation["exit"] = EXIT_STOPPED
         raise
     except BaseException as error:
-        invocation["exit"], invocation["crash"] = EXIT_CRASHED, type(error).__name__
+        invocation["exit"], invocation["crash"] = EXIT_CRASHED, crash_class(error)
         raise
     finally:
         if invocation["elapsed_s"] is None:

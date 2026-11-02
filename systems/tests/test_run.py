@@ -1,10 +1,16 @@
 """The plumbing that every system's run shares (common/asofbench_systems/run.py): the output
 directory's lock and the SIGTERM that cancels an invocation, run.json's invocation records and
-their atomic writes, JSON lines, the image IDs, the wait for the services and the network check,
-the classification of infrastructure errors, the stop, and the key check, the error text, the
-crash report, the hash of a file and the atomic write of any text. What each piece does with a
-system's own values is checked in that system's wiring tests: Graphiti's in
-test_graphiti_wiring.py, the reader's in test_reader_wiring.py. Standard library only."""
+their atomic writes (a crash's class among them, through a group of one), JSON lines, the image
+IDs, the wait for the services and the network check, the classification of infrastructure
+errors, the stop, and the key check, the error text, the crash report, the hash of a file and the
+atomic write of any text, each on values of the tests' own. What each system gives these pieces
+is checked with that system: Graphiti's infrastructure errors, key check, image names and network
+check in test_graphiti_wiring.py, and its lock's refusal, run.json's records, the SIGTERM and a
+crash in test_ingest_resume.py; the reader's network check and image names in
+test_reader_wiring.py, and its lock's refusal, run.json's records, its stops and a crash in
+test_answer_requests.py; grep at D's network check and image names in test_grep_agent.py, and
+the lock and the image names of its runner of the dates in test_run_dates.py. Standard library
+only."""
 
 from __future__ import annotations
 
@@ -306,6 +312,34 @@ def test_a_crash_is_recorded_as_exit_4_with_the_class_of_the_exception(tmp_path)
     assert [(i["exit"], i["crash"]) for i in json.loads(
         path.read_text(encoding="utf-8"))["invocations"]] == [(4, "KeyError"),
                                                               (4, "CancelledError")]
+
+
+def test_a_crash_inside_a_group_of_one_is_recorded_with_the_class_of_that_one(tmp_path):
+    # A worker's exception reaches the invocation inside the group of one that asyncio.TaskGroup
+    # raises: run.json records the class of that one exception, through groups of one at any
+    # depth, and the group's own class only for a group of several.
+    path = tmp_path / "run.json"
+    record = {"invocations": []}
+    cases = [
+        (ExceptionGroup("one worker", [ValueError("a bug")]), "ValueError"),
+        (ExceptionGroup("outer", [ExceptionGroup("inner", [OSError("the disk filled")])]),
+         "OSError"),
+        (BaseExceptionGroup("one worker", [asyncio.CancelledError()]), "CancelledError"),
+        (ExceptionGroup("two workers", [ValueError("a"), KeyError("b")]), "ExceptionGroup"),
+        (ExceptionGroup("outer", [ExceptionGroup("two", [ValueError("a"), KeyError("b")])]),
+         "ExceptionGroup"),
+        (BaseExceptionGroup("two", [ValueError("a"), KeyboardInterrupt()]),
+         "BaseExceptionGroup"),
+    ]
+    for error, expected in cases:
+        assert run.crash_class(error) == expected
+        invocation = run.new_invocation("answer", IMAGES)
+        with pytest.raises(type(error)), run.recorded(record, invocation, path, time.monotonic()):
+            raise error
+        assert (invocation["exit"], invocation["crash"]) == (run.EXIT_CRASHED, expected)
+    assert run.crash_class(KeyError("x")) == "KeyError"
+    assert [i["crash"] for i in json.loads(path.read_text(encoding="utf-8"))["invocations"]] == [
+        expected for _, expected in cases]
 
 
 def test_an_elapsed_time_that_the_body_set_is_kept(tmp_path):

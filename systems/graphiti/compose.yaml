@@ -42,12 +42,12 @@ services:
   embedder:
     image: asofbench/embedder
     build: ../env/embedder
-    # glibc's allocator, set for memory only: it gives each thread its own arena and raises its
-    # mmap threshold after large frees, so the activation buffers of large batches stayed resident
-    # and the server grew to about 1.5 GiB in 30-40 minutes of ingestion, until the Docker VM's
-    # out-of-memory killer ended it. Two arenas and a fixed 128 KiB mmap threshold return them:
-    # M0's server stayed near 0.5-0.6 GiB. The model, its weights, its dtype and every vector are
-    # the same with or without these.
+    # glibc's allocator, set for memory only: by default it gives each thread its own arena and
+    # raises its mmap threshold after large frees, which can keep the activation buffers of large
+    # batches resident. Without these settings M0's server read up to 1.48 GiB, and it was ended
+    # and restarted twice, most likely by the Docker VM's out-of-memory killer; with two arenas
+    # and a fixed 128 KiB mmap threshold it read 491 to 593 MiB, as results/m0 records. The
+    # model, its weights, its dtype and every vector are the same with or without these.
     environment:
       MALLOC_ARENA_MAX: "2"
       MALLOC_MMAP_THRESHOLD_: "131072"
@@ -76,10 +76,10 @@ services:
       - neo4j-data:/data
     networks:
       - inner
-    # 1.5 GiB, with the heap (512 MiB at most) and the page cache (128 MiB) as they are: the
-    # JVM's native memory took the container to a 1 GiB limit within minutes of each restart once
-    # the store held about 900 episodes, and Neo4j restarted during a commit. M0's store of 1,441
-    # episodes took about 1.2 GiB.
+    # 1.5 GiB, with the heap (512 MiB at most) and the page cache (128 MiB) as they are: at a
+    # 1 GiB limit M0's Neo4j read up to 972 MiB, well beyond its heap and page cache, and
+    # restarted during a commit once the store held about 900 episodes; at 1.5 GiB it read
+    # 1.20 GiB with 1,117 episodes logged, as results/m0 records.
     mem_limit: 1536m
     oom_score_adj: 1000
     restart: unless-stopped

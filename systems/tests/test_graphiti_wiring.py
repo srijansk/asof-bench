@@ -259,7 +259,7 @@ def test_compose_gives_the_embedder_its_allocator_settings_and_neo4j_1_5_gib_as_
     config = json.loads((GRAPHITI / "config.json").read_text(encoding="utf-8"))
     embedder, neo4j = block(compose, "embedder", 2), block(compose, "neo4j", 2)
     # The embedding server's glibc allocator, for its memory only: two arenas and a fixed 128 KiB
-    # mmap threshold, which M0 needed to keep the server near 0.5 GiB.
+    # mmap threshold, with which M0's server read 491 to 593 MiB (results/m0).
     allocator = settings(block("\n".join(embedder), "environment", 4)[1:])
     assert allocator == {"MALLOC_ARENA_MAX": "2", "MALLOC_MMAP_THRESHOLD_": "131072",
                          "MALLOC_TRIM_THRESHOLD_": "131072"}

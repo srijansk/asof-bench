@@ -16,8 +16,10 @@ A request is one JSON line that the harness wrote (systems/harness.py): ``key``,
 ``question``, the item's question text, and, for long context and the oracle, ``context``. The
 reader refuses a line with any other field or without those two, a key that is not a UUID4 in its
 canonical form or that occurs twice, and a requests file whose directory holds anything else,
-since the harness's keys and plan, which hold each item's id, stay on the host. It reads the
-requests file one line at a time, so that a file of long contexts is never held whole.
+since the harness's keys and plan, which hold each item's id, stay on the host; and an entrant
+whose requests hold the question alone (``main``'s ``takes_context`` false, as for grep at D)
+refuses a line with a context, which is another entrant's, before anything is answered. It reads
+the requests file one line at a time, so that a file of long contexts is never held whole.
 
 Every invocation first checks that it can read the API key file, then takes the output
 directory's lock (``asofbench_systems.run.hold_lock``: ``run.lock``, created with O_EXCL) and holds
@@ -184,10 +186,11 @@ def requests_of(path: Path) -> Iterator[dict]:
             yield request
 
 
-def scan_requests(path: Path) -> list[str]:
+def scan_requests(path: Path, *, takes_context: bool = True) -> list[str]:
     """The keys of the requests file at ``path``, in its order, after checking that the file is
-    alone in its directory and that every line is a request with a key of its own; Refused
-    otherwise."""
+    alone in its directory, that every line is a request with a key of its own and, when
+    ``takes_context`` is false (an entrant whose requests hold the question alone, as grep at D's
+    do), that no line holds a context; Refused otherwise."""
     if not path.is_file():
         raise Refused(f"{path} is not a file")
     if others := sorted(entry.name for entry in path.parent.iterdir() if entry.name != path.name):
@@ -199,6 +202,9 @@ def scan_requests(path: Path) -> list[str]:
     for number, request in enumerate(requests_of(path), 1):
         if request["key"] in seen:
             raise Refused(f"{path.name}: line {number}'s key occurs twice")
+        if not takes_context and "context" in request:
+            raise Refused(f"{path.name}: line {number} holds a context, which this entrant's "
+                          "requests never hold: the requests file is another entrant's")
         seen.add(request["key"])
         keys.append(request["key"])
     if not keys:
@@ -295,9 +301,10 @@ async def run(requests: Path, out: Path, model: str, *, resume: bool, images: di
               ask: Callable[..., Awaitable[dict]] = answer.answer_once,
               preflight: Callable[[Path], int] | None = netcheck_preflight,
               key_file: str = llm.KEY_FILE, concurrency: int = CONCURRENCY,
-              progress: Callable[[str], None] = print, api_errors_before: int = 0) -> int:
+              progress: Callable[[str], None] = print, api_errors_before: int = 0,
+              takes_context: bool = True) -> int:
     """One invocation of an answering run (the module's description); Refused when it cannot
-    start."""
+    start, among the reasons a requests file with a context when ``takes_context`` is false."""
     if model not in answer.MODELS:
         raise Refused(f"--model {model!r} is not an answering model ({', '.join(answer.MODELS)})")
     if api_errors_before < 0:
@@ -309,17 +316,17 @@ async def run(requests: Path, out: Path, model: str, *, resume: bool, images: di
         return await _run(requests, out, model, resume=resume, images=images,
                           open_client=open_client, ask=ask, preflight=preflight,
                           key_file=key_file, concurrency=concurrency, progress=progress,
-                          api_errors_before=api_errors_before)
+                          api_errors_before=api_errors_before, takes_context=takes_context)
 
 
 async def _run(requests: Path, out: Path, model: str, *, resume: bool, images: dict[str, str],
                open_client: Callable, ask: Callable[..., Awaitable[dict]], preflight,
                key_file: str, concurrency: int, progress: Callable[[str], None],
-               api_errors_before: int) -> int:
+               api_errors_before: int, takes_context: bool) -> int:
     begun = time.monotonic()
     out_dir = out.parent
     usage_path, run_path = out_dir / USAGE, out_dir / RUN
-    keys = scan_requests(requests)
+    keys = scan_requests(requests, takes_context=takes_context)
     requests_sha256 = sha256_file(requests)
     if resume:
         if not run_path.exists():
@@ -393,11 +400,13 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
          ask: Callable[..., Awaitable[dict]] = answer.answer_once,
          image_names: Sequence[str] = IMAGE_NAMES,
          preflight: Callable[[Path], int] = netcheck_preflight,
-         self_test: Callable[[], int] | None = None) -> int:
+         self_test: Callable[[], int] | None = None, takes_context: bool = True) -> int:
     """The command line of an answering run: the reader's own, or that of an entrant whose image is
     built FROM the reader image and answers through this runner with an answering function
     (``ask``), images, a network check and a self-test of its own, as grep at D's does
-    (grep-at-d/agent.py, in asofbench/grep-at-d)."""
+    (grep-at-d/agent.py, in asofbench/grep-at-d), and, when its requests never hold a context
+    (``takes_context`` false, as for grep at D), the refusal of a requests file that holds one,
+    another entrant's, before anything is answered."""
     parser = argparse.ArgumentParser(prog=prog, description="Answers a requests file with the "
                                      "answering model, inside the run environment.",
                                      allow_abbrev=False)
@@ -431,7 +440,8 @@ def main(argv: list[str] | None = None, *, prog: str = "answer_requests",
         images = parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"), image_names)
         return asyncio.run(run(args.requests, args.out, args.model, resume=args.resume,
                                images=images, ask=ask, preflight=preflight,
-                               api_errors_before=args.api_errors_before or 0))
+                               api_errors_before=args.api_errors_before or 0,
+                               takes_context=takes_context))
     except Refused as refusal:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return EXIT_STOPPED

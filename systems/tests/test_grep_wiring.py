@@ -5,8 +5,9 @@ and sandbox_net); grep at D's image, the reader image with the agent's files add
 every module that they import being the reader image's; the sandbox's Dockerfile
 (debian:stable-slim pinned by digest, gawk and python3 from a fixed snapshot of the Debian
 archive, a user that is not root, the command server and its self-test with no network); and its
-config.json against the code it records, and against closed book's where the two share the reader
-image. Standard library only, with packaging, which pytest installs."""
+config.json against the code it records, the sandbox's package versions against the packages that
+its Dockerfile lists, and against closed book's where the two share the reader image. Standard
+library only, with packaging, which pytest installs."""
 
 from __future__ import annotations
 
@@ -235,6 +236,20 @@ def test_grep_at_d_s_config_records_what_the_code_sends_and_runs():
     assert "grep_at_d --self-test" in installed["images"]["asofbench/grep-at-d"]
     assert installed["sandbox"]["base_image"] == BASE_IMAGE
     assert installed["sandbox"]["debian_snapshot"] == SNAPSHOT
+    # The version of each package that the sandbox's build lists with dpkg-query, and of no
+    # other, as the build installed it from the snapshot that fixes it.
+    (listed,) = re.findall(r"dpkg-query -W -f '\$\{Package\}=\$\{Version\}\\n' ([a-z0-9 ]+)$",
+                           SANDBOX_DOCKERFILE, re.M)
+    versions = installed["sandbox"]["package_versions"]
+    assert sorted(versions) == sorted(listed.split())
+    assert all(re.fullmatch(r"([0-9]+:)?[0-9][A-Za-z0-9.+~-]*", version)
+               for version in versions.values())
+    assert SNAPSHOT in sandbox["packages"] and "package_versions" in sandbox["packages"]
+    # Where each date's tree came from is recorded on the host, in a file that no container is
+    # given.
+    assert "trees.json" in CONFIG["run"]["trees"] and "given to no container" in (
+        CONFIG["run"]["trees"])
+    assert "trees.json" in CONFIG["network_policy"]["unreachable"]
     assert all(name in installed["per_run"] for name in ("grep at D's", "the reader's"))
     assert CONFIG["requests"]["fields"] == ["key", "question"]
     text = (GREP_AT_D / "config.json").read_text(encoding="utf-8")

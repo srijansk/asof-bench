@@ -31,17 +31,25 @@ directory stops at once. Then, for each file in dates.json's order:
    the tree is made 0755 and every file 0644, whatever the umask, so that the sandbox's user, uid
    10001, reads it on any Docker host. A tree that is not built whole (materialize refuses it, or
    anything goes wrong while it is built, a SIGTERM among them) is deleted at once, and the date
-   is not run;
+   is not run. materialize checks the stream against the SHA-256 that the build's manifest
+   registers for the arm before it reads it; once the tree is built the stream is hashed again,
+   and a stream that is no longer the registered one gets its tree deleted and its date not run.
+   Then the tree is recorded in the run directory's trees.json (``record_tree``), on the host and
+   given to no container: under the date's file, its arm and date and, for each tree built for it
+   (a resumed date's included), when it was built and the name and SHA-256 of the stream it was
+   built from, so that where each date's tree came from can be checked from the run's outputs
+   alone, against the manifest that plan.json records;
 3. grep at D's environment (compose.yaml) answers the date's requests: ``docker compose run`` of
    the agent, with ASOFBENCH_RUN_INPUT the date's input/<file>/, ASOFBENCH_RUN_OUTPUT its
    output/<file>/ and ASOFBENCH_RUN_TREE the tree, which the sandbox holds read-only at /repo; no
-   other file of the run directory, no other date's tree and no stream is mounted. The run is
-   given ``--api-errors-before``, the ``api_error`` responses in a row that the dates before it
-   ended with, in the order they were answered (dates.json's): a date whose responses are all
-   ``api_error`` adds its count to the one before it, and any other date's count starts again
-   from the ``api_error`` responses that it ends with. The runner counts on from it, so that its
-   stop after five ``api_error`` responses in a row (exit status 3) fires wherever the fifth
-   falls, across the dates as within one;
+   other file of the run directory (trees.json, plan.json, dates.json and keys.jsonl among them),
+   no other date's tree and no stream is mounted. The run is given ``--api-errors-before``, the
+   ``api_error`` responses in a row that the dates before it ended with, in the order they were
+   answered (dates.json's): a date whose responses are all ``api_error`` adds its count to the
+   one before it, and any other date's count starts again from the ``api_error`` responses that
+   it ends with. The runner counts on from it, so that its stop after five ``api_error``
+   responses in a row (exit status 3) fires wherever the fifth falls, across the dates as within
+   one;
 4. whatever the run did, the proxy's log is saved beside the date's responses (egress.log, and
    egress-<n>.log for a later attempt), the environment is taken down (``docker compose down``,
    which runs even when the log cannot be saved, and whose failure stops this invocation, since
@@ -55,12 +63,13 @@ environment's removal, records itself, and the next invocation resumes the date.
 
 Exit status: 0 when every date is done and every request has an answer; 1 when every date is done
 and some requests hold an error code; 2 when it is refused before it starts (another invocation
-holds the lock among the reasons, and nothing is built), when a tree cannot be built, when a
-date's run stops with exit status 2 (an infrastructure error or a network check that failed) or
-is killed, when the environment did not start the run (docker compose itself failed, and no
-invocation was recorded) or cannot be taken down, or on a SIGTERM; 3 when a date's run stopped
-with exit status 3; 4 when a date's run crashed, or for an error that no rule expects. A stop
-leaves the dates after it as they were, and running it again goes on from the date that stopped.
+holds the lock among the reasons, and nothing is built), when a tree cannot be built (or its
+stream changed while it was built), when a date's run stops with exit status 2 (an
+infrastructure error or a network check that failed) or is killed, when the environment did not
+start the run (docker compose itself failed, and no invocation was recorded) or cannot be taken
+down, or on a SIGTERM; 3 when a date's run stopped with exit status 3; 4 when a date's run
+crashed, or for an error that no rule expects. A stop leaves the dates after it as they were, and
+running it again goes on from the date that stopped.
 
 It uses the standard library, the asofbench package, harness.py, the reader's runner (for the
 rule that counts api_error responses) and the shared run plumbing, which it puts on the import
@@ -118,6 +127,9 @@ README = "systems/README.md"
 PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # The modes of a tree's directories and files: readable by every user, the sandbox's included.
 TREE_DIRECTORY_MODE, TREE_FILE_MODE = 0o755, 0o644
+# The record of the trees built for each date, beside plan.json and dates.json in the run
+# directory, which no container is given (``record_tree``).
+TREES = "trees.json"
 
 
 class Terminated(BaseException):
@@ -222,9 +234,7 @@ def date_record(output: Path) -> dict | None:
 
 def date_responses(output: Path, record: dict) -> list[dict]:
     """The responses that a date's run wrote, in the order it wrote them."""
-    name = record.get("responses")
-    if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
-        raise Refused(f"{output.name}/{RUN} names no responses file")
+    name = answer.responses_name(record, f"{harness.OUTPUT}/{output.name}")
     return read_jsonl(output / name)
 
 
@@ -258,13 +268,29 @@ def build_tree(entry: dict, streams_dir: Path, data: Path, trees_dir: Path) -> P
             shutil.rmtree(tree)
 
 
-def run_date(name: str, entry: dict, run_dir: Path, data: Path, streams_dir: Path,
-             trees_dir: Path, model: str, *, resume: bool, api_errors_before: int, project: str,
-             compose: Callable, environ: Mapping[str, str],
+def record_tree(run_dir: Path, name: str, entry: dict, stream: str, digest: str) -> None:
+    """Adds the tree just built for the date ``name`` (dates.json's ``entry``) to the run
+    directory's trees.json: the date's arm and date, and for each tree built for it, in the order
+    they were built, when it was built and the name and SHA-256 of the stream that it was built
+    from. The file is written whole each time, and no container is given it."""
+    path = run_dir / TREES
+    record = harness.load_json(path) if path.exists() else {}
+    earlier = record.get(name, {"trees": []})
+    if not isinstance(earlier, dict) or not isinstance(earlier.get("trees"), list):
+        raise Refused(f"{TREES}: the entry of {name} is not one that run_dates.py writes")
+    record[name] = {"arm": entry["arm"], "as_of": entry["as_of"],
+                    "trees": [*earlier["trees"], {"built_at": plumbing.utc_now(),
+                                                  "stream": stream, "stream_sha256": digest}]}
+    plumbing.write_json(path, record)
+
+
+def run_date(name: str, entry: dict, run_dir: Path, data: Path, manifest: dict,
+             streams_dir: Path, trees_dir: Path, model: str, *, resume: bool,
+             api_errors_before: int, project: str, compose: Callable, environ: Mapping[str, str],
              progress: Callable[[str], None]) -> int:
-    """One date's run: its tree built, its requests answered, the environment taken down and the
-    tree deleted (the module's description); returns the run's exit status, or 2 when no run
-    began or the environment could not be taken down."""
+    """One date's run: its tree built and recorded, its requests answered, the environment taken
+    down and the tree deleted (the module's description); returns the run's exit status, or 2
+    when no run began or the environment could not be taken down."""
     output = run_dir / harness.OUTPUT / name
     before = date_record(output)
     # The build is inside the block that deletes the tree, so that a SIGTERM just after it is
@@ -276,6 +302,18 @@ def run_date(name: str, entry: dict, run_dir: Path, data: Path, streams_dir: Pat
             progress(f"run_dates.py: {name}: its tree could not be built (asofbench materialize "
                      "refused it), so nothing was run")
             return EXIT_STOPPED
+        # materialize checked the stream against the SHA-256 that the manifest registers before
+        # it read it; the stream is hashed again now that the tree is built, and must still be
+        # the registered one, so that the SHA-256 that trees.json records is that of the stream
+        # the tree was built from.
+        try:
+            ((_, digest),) = harness.registered_streams(
+                {entry["arm"]}, streams_dir, manifest, data / harness.MANIFEST).values()
+        except Refused as refusal:
+            progress(f"run_dates.py: {name}: after its tree was built, {refusal}; the tree was "
+                     "deleted and nothing was run")
+            return EXIT_STOPPED
+        record_tree(run_dir, name, entry, STREAM_FILES[entry["arm"]], digest)
         env = {**environ,
                "ASOFBENCH_RUN_INPUT": str((run_dir / harness.INPUT / name).resolve()),
                "ASOFBENCH_RUN_OUTPUT": str(output.resolve()),
@@ -354,23 +392,24 @@ def run(run_dir: Path, data: Path, streams_dir: Path, trees_dir: Path, model: st
     with hold_lock(run_dir, "run_dates", readme=README), terminated_on_sigterm():
         try:
             _, dates = checked_run_dir(run_dir, data)
+            manifest = harness.load_json(data / harness.MANIFEST)
             for arm in sorted({entry["arm"] for entry in dates.values()}):
                 if not (streams_dir / STREAM_FILES[arm]).is_file():
                     raise Refused(f"{streams_dir} holds no {STREAM_FILES[arm]}, the {arm} "
                                   "stream, from which the trees of its dates are built")
-            return run_all(dates, run_dir, data, streams_dir, trees_dir, model, project=project,
-                           compose=compose, environ=environ, progress=progress)
+            return run_all(dates, run_dir, data, manifest, streams_dir, trees_dir, model,
+                           project=project, compose=compose, environ=environ, progress=progress)
         except Terminated:
             progress("run_dates.py: stopped by a SIGTERM: the date under way, if any, was taken "
                      "down and its tree deleted; run this again to resume it")
             return EXIT_STOPPED
 
 
-def run_all(dates: dict, run_dir: Path, data: Path, streams_dir: Path, trees_dir: Path,
-            model: str, *, project: str, compose: Callable, environ: Mapping[str, str],
-            progress: Callable[[str], None]) -> int:
+def run_all(dates: dict, run_dir: Path, data: Path, manifest: dict, streams_dir: Path,
+            trees_dir: Path, model: str, *, project: str, compose: Callable,
+            environ: Mapping[str, str], progress: Callable[[str], None]) -> int:
     """The dates in turn, with the count of api_error responses in a row carried from each to the
-    next (the module's description)."""
+    next (the module's description); ``manifest`` is the build's MANIFEST.json."""
     unanswered, carried = False, 0
     for name, entry in dates.items():
         output = run_dir / harness.OUTPUT / name
@@ -383,7 +422,7 @@ def run_all(dates: dict, run_dir: Path, data: Path, streams_dir: Path, trees_dir
         if record is not None and last == EXIT_FAILURES:
             progress(discard(name))
             return EXIT_FAILURES
-        code = run_date(name, entry, run_dir, data, streams_dir, trees_dir, model,
+        code = run_date(name, entry, run_dir, data, manifest, streams_dir, trees_dir, model,
                         resume=record is not None, api_errors_before=carried, project=project,
                         compose=compose, environ=environ, progress=progress)
         if code == EXIT_FAILURES:

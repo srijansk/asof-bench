@@ -381,6 +381,24 @@ def test_a_requests_file_that_is_no_list_of_requests_is_refused(layout):
     assert list((layout / "output").iterdir()) == []
 
 
+def test_an_entrant_whose_requests_hold_no_context_refuses_a_file_that_holds_one(layout):
+    requests = write_requests(layout, 3, contexts=(1,))
+    path = layout / "input" / "requests.jsonl"
+    # The single-call entrants' runner takes a context, long context's and the oracle's.
+    assert reader.scan_requests(path) == [r["key"] for r in requests]
+    # An entrant whose requests hold the question alone, as grep at D's do, refuses the file
+    # when it reads it, before anything is answered or written.
+    with pytest.raises(plumbing.Refused) as caught:
+        reader.scan_requests(path, takes_context=False)
+    assert str(caught.value) == ("requests.jsonl: line 2 holds a context, which this entrant's "
+                                 "requests never hold: the requests file is another entrant's")
+    asker = Asker()
+    with pytest.raises(plumbing.Refused, match="line 2 holds a context"):
+        go(layout, asker, takes_context=False)
+    assert asker.calls == [] and list((layout / "output").iterdir()) == []
+    assert go(layout, asker) == plumbing.EXIT_DONE and len(asker.calls) == 3
+
+
 def test_a_requests_file_that_is_not_alone_in_its_directory_is_refused(layout):
     write_requests(layout, 2)
     # The harness's host-side files, beside the requests as an operator might mount them.
@@ -430,8 +448,9 @@ def test_a_crash_is_recorded_with_exit_status_4(layout):
     with pytest.raises(ExceptionGroup):
         go(layout, Asker(raises={"question 1": ValueError("a bug")}))
     (invocation,) = record_of(layout)["invocations"]
-    # The workers' TaskGroup raises the group, as Graphiti's ingestion's groups do.
-    assert (invocation["exit"], invocation["crash"]) == (4, "ExceptionGroup")
+    # The workers' TaskGroup raises a group that holds the one worker's exception, as Graphiti's
+    # ingestion's groups do, and run.json records the class of that exception.
+    assert (invocation["exit"], invocation["crash"]) == (4, "ValueError")
     assert not (layout / "output" / "run.lock").exists()
 
 

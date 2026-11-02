@@ -4,12 +4,11 @@
 # anthropic 0.78.0, the lowest release whose messages.create takes all three things that every
 # answering call sends (PREREGISTRATION.md section 11): output_config with effort, the json_schema
 # output format (output_config.format) and adaptive thinking, thinking={"type": "adaptive"}. The
-# SDK's CHANGELOG.md gives 0.77.0 (2026-01-29) "add support for Structured Outputs in the Messages
-# API" and "migrate sending message format in output_config rather than output_format", and 0.78.0
-# (2026-02-05) "Release Claude Opus 4.6, adaptive thinking, and other features"; and the packages
-# agree: 0.77.1, the release before 0.78.0, has an OutputConfigParam with format only and a
-# ThinkingConfigParam with no adaptive type, and 0.78.0 has effort ("low", "medium", "high" or
-# "max") beside format in OutputConfigParam and ThinkingConfigAdaptiveParam in ThinkingConfigParam.
+# SDK's CHANGELOG.md has structured outputs move into output_config at 0.77.0 (2026-01-29), and
+# adaptive thinking arrive with Claude Opus 4.6 at 0.78.0 (2026-02-05); the packages agree: 0.77.1,
+# the release before 0.78.0, has an OutputConfigParam with format only and a ThinkingConfigParam
+# with no adaptive type, and 0.78.0 has effort ("low", "medium", "high" or "max") beside format in
+# OutputConfigParam and ThinkingConfigAdaptiveParam in ThinkingConfigParam.
 # It is of the SDK's 0.x line, built on httpx, as Graphiti's 0.111.0 is; every other package is at
 # the latest version that the resolver chose, at the date the header records.
 anthropic==0.78.0

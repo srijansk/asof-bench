@@ -1,6 +1,6 @@
 {
   "system": "long-context",
-  "description": "Long context: the answering model receives the question and, as its context, every episode of the one proposal that the question names, from the item's arm's stream, those recorded after the item's date included, in stream order (PREREGISTRATION.md section 11). systems/harness.py builds each request's context from the streams (long_context) and writes the requests and the answer rows, and the reader image (systems/reader) answers the requests, unchanged, with asofbench_systems.answer.answer_once; systems/README.md describes both.",
+  "description": "Long context: the answering model receives the question and, as its context, every episode of the one proposal that the question names, from the item's arm's stream, those recorded after the item's date included, in stream order (PREREGISTRATION.md section 11). systems/harness.py builds each request's context from the streams (long_contexts) and writes the requests and the answer rows, and the reader image (systems/reader) answers the requests, unchanged, with asofbench_systems.answer.answer_once; systems/README.md describes both.",
   "inputs": "the question text and, as its context, every episode that the item's arm's stream holds of the proposal the question names, those recorded after the item's date included, in stream order",
   "entries": "the F1, F2 and CF items in every arm that their arms field lists (section 12), each three times (runs 1, 2 and 3), and no F3, F4 or F5 item; in a pilot run, the items of a list such as data/v0.1/pilot.json (harness.py requests --items); harness.py requests --streams-dir names the directory that holds the streams",
   "requests": {
@@ -28,7 +28,7 @@
       "H+": "an H+ item reads the H+ stream (h-plus.jsonl)",
       "H-": "an H- item reads the H- stream (h-minus.jsonl), whose episodes withhold the header lines of section 8",
       "CF": "a CF item reads the counterfactual stream (cf.jsonl)",
-      "check": "the harness reads a stream only after checking its SHA-256 against the one that the build's MANIFEST.json registers for the arm, and records each stream's name and SHA-256 in plan.json"
+      "check": "the harness checks a stream's SHA-256 against the one that the build's MANIFEST.json registers for the arm before it reads the stream, hashes the bytes again as it parses them and refuses the stream unless they have the same SHA-256 (so a stream that changes after the check, or is not whole when it is read, is refused and nothing is written), and records each stream's name and SHA-256 in plan.json"
     },
     "episodes": "every episode of the proposal that the stream holds, in the stream's order, those recorded after the item's date included: the harness never removes episodes by date",
     "truncation": "none: the context is never cut. claude-haiku-5-5 and claude-sonnet-5-5 take 1M tokens, and a request over that limit fails at the API with an error of the request's own, not an infrastructure error, so the reader records it as that request's api_error response and its row has a null answer, which scores zero (section 12)",

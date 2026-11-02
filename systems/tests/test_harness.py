@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import itertools
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ if shutil.which("git") is None:
 import harness  # noqa: E402 - systems/ is on the path (conftest.py)
 
 from asofbench import cli, scoring  # noqa: E402
+from asofbench.stream import STREAM_FILES  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 NINE = ["id", "system", "arm", "run", "answer", "tokens_in", "tokens_out", "wall_s",
@@ -35,10 +37,10 @@ NINE = ["id", "system", "arm", "run", "answer", "tokens_in", "tokens_out", "wall
 def toy(tmp_path_factory) -> Path:
     """The toy world, built once: its data (toy-data/) and its H- stream."""
     spec = importlib.util.spec_from_file_location("toy_world", ROOT / "examples" / "toy_world.py")
-    world = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(world)
+    toy_world = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(toy_world)
     root = tmp_path_factory.mktemp("toy") / "world"
-    assert world.main([str(root)]) == 0
+    assert toy_world.main([str(root)]) == 0
     return root
 
 
@@ -48,7 +50,8 @@ def questions(toy) -> list[dict]:
 
 
 def lines(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    """The JSON lines of a file, split at newlines only, as the reader splits a requests file."""
+    return [json.loads(line) for line in path.read_bytes().decode("utf-8").split("\n") if line]
 
 
 def sha256(path: Path) -> str:
@@ -370,30 +373,66 @@ def test_an_interrupted_requests_leaves_no_requests_file_for_a_container_to_answ
     def interrupted(*args, **kwargs):
         raise OSError("the disk filled")
 
-    real = uuid.uuid4
-    made = []
+    real_uuid4, real_dumps, real_replace = uuid.uuid4, json.dumps, os.replace
+    drawn, dumped, renamed = [], [], []
 
     def uuid4_until_the_sixth():
-        made.append(1)
-        if len(made) > 5:
+        drawn.append(1)
+        if len(drawn) > 5:
             raise OSError("the disk filled")
-        return real()
+        return real_uuid4()
 
-    # Interrupted while it writes the lines, and then while it writes the plan, which comes
-    # before either file has its name.
+    def dumps_until_the_sixth_request(value, *args, **kwargs):
+        # A request line is the only dict with a question in it: the keys' lines and the plan hold
+        # none.
+        if isinstance(value, dict) and "question" in value:
+            dumped.append(1)
+            if len(dumped) > 5:
+                raise OSError("the disk filled")
+        return real_dumps(value, *args, **kwargs)
+
+    def replace_the_keys_but_not_the_requests(source, destination):
+        # The plan's own atomic write renames too: only the two files' names count.
+        if Path(destination).name in ("keys.jsonl", "requests.jsonl"):
+            renamed.append(Path(destination).name)
+            if len(renamed) > 1:
+                raise OSError("the disk failed")
+        return real_replace(source, destination)
+
+    # Interrupted while the keys are drawn, before either file is opened; while the request lines
+    # are written, with five of them in the file already; while the plan is written, which comes
+    # before either file has its name; and between the two renames, of which the keys' is first.
     monkeypatch.setattr(harness.uuid, "uuid4", uuid4_until_the_sixth)
+    assert make_requests(toy, tmp_path / "keys") == 4
+    monkeypatch.setattr(harness.uuid, "uuid4", real_uuid4)
+    monkeypatch.setattr(json, "dumps", dumps_until_the_sixth_request)
     assert make_requests(toy, tmp_path / "lines") == 4
-    monkeypatch.setattr(harness.uuid, "uuid4", real)
+    monkeypatch.setattr(json, "dumps", real_dumps)
     monkeypatch.setattr(harness, "write_json", interrupted)
     assert make_requests(toy, tmp_path / "plan") == 4
-    for run_dir in (tmp_path / "lines", tmp_path / "plan"):
+    monkeypatch.undo()
+    monkeypatch.setattr(os, "replace", replace_the_keys_but_not_the_requests)
+    assert make_requests(toy, tmp_path / "renames") == 4
+    monkeypatch.undo()
+    # The five lines that were written are in the file under its temporary name, which is no
+    # requests file.
+    pending = harness.temporary_path(tmp_path / "lines" / "input" / "requests.jsonl")
+    assert pending.read_bytes().count(b"\n") == 5
+    for name in ("keys", "lines", "plan", "renames"):
+        run_dir = tmp_path / name
         assert not (run_dir / "input" / "requests.jsonl").exists()
-        assert not (run_dir / "keys.jsonl").exists() and not (run_dir / "plan.json").exists()
-        # The reader finds no requests file there, and the harness refuses the directory again.
+        # The reader finds no requests file there.
         with pytest.raises(answer_requests.Refused, match="is not a file"):
             answer_requests.scan_requests(run_dir / "input" / "requests.jsonl")
-    monkeypatch.undo()
-    assert make_requests(toy, tmp_path / "lines") == 2
+    for name in ("keys", "lines", "plan"):
+        assert not (tmp_path / name / "keys.jsonl").exists()
+        assert not (tmp_path / name / "plan.json").exists()
+    # Between the renames the keys, which go first, are in place and the requests are not.
+    assert (tmp_path / "renames" / "keys.jsonl").exists()
+    assert (tmp_path / "renames" / "plan.json").exists()
+    # And the harness refuses each directory again.
+    for name in ("keys", "lines", "plan", "renames"):
+        assert make_requests(toy, tmp_path / name) == 2, name
 
 
 def test_an_input_that_cannot_be_read_is_refused_with_exit_status_2(toy, tmp_path, capsys):
@@ -434,3 +473,77 @@ def test_an_error_that_no_rule_expects_exits_4_and_never_1(toy, tmp_path, monkey
     out = tmp_path / "answers.jsonl"
     assert make_rows(run_dir, out) == 4 and not out.exists()
     assert "crashed (exit 4)" in capsys.readouterr().err
+
+
+# --- every entrant's requests: the streams they read, and their order --------------------------
+# Long context and the oracle read the toy world's three streams, which its manifest registers
+# (the `world` fixture); closed book reads none.
+
+
+def make_streamed_requests(world: Path, out: Path, system: str, *extra: str) -> int:
+    """`requests` on the toy world with its streams registered: long context and the oracle are
+    given the streams' directory, closed book none."""
+    streams = [] if system == "closed-book" else ["--streams-dir", str(world / "streams")]
+    return make_requests(world, out, *streams, *extra, system=system)
+
+
+def test_plan_json_names_the_streams_a_run_read_and_closed_book_reads_none(world, tmp_path):
+    for system, arms in (("long-context", ["CF", "H+", "H-"]), ("oracle", ["CF", "H+"])):
+        assert make_streamed_requests(world, tmp_path / system, system) == 0
+        plan = json.loads((tmp_path / system / "plan.json").read_text(encoding="utf-8"))
+        assert plan["system"] == system
+        assert plan["streams"] == {arm: {"file": STREAM_FILES[arm],
+                                         "sha256": sha256(world / "streams" / STREAM_FILES[arm])}
+                                   for arm in arms}
+        assert str(tmp_path) not in json.dumps(plan) and str(ROOT) not in json.dumps(plan)
+        assert plan["requests_sha256"] == sha256(tmp_path / system / "input" / "requests.jsonl")
+        assert plan["keys_sha256"] == sha256(tmp_path / system / "keys.jsonl")
+        assert sorted(p.name for p in (tmp_path / system).iterdir()) == [
+            "input", "keys.jsonl", "output", "plan.json"]
+        assert sorted(p.name for p in (tmp_path / system / "input").iterdir()) == [
+            "requests.jsonl"]
+    # Only the streams the asked items need are read: one counterfactual item reads cf.jsonl.
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps(["CF-counterfactual-PEP-1-2013-09-02"]), encoding="utf-8")
+    assert make_streamed_requests(world, tmp_path / "cf-only", "oracle", "--items", str(one),
+                                  "--runs", "2") == 0
+    plan = json.loads((tmp_path / "cf-only" / "plan.json").read_text(encoding="utf-8"))
+    assert list(plan["streams"]) == ["CF"] and plan["requests"] == 1
+    assert make_streamed_requests(world, tmp_path / "closed", "closed-book") == 0
+    plan = json.loads((tmp_path / "closed" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["streams"] is None
+
+
+@pytest.mark.parametrize("system", ["closed-book", "long-context", "oracle"])
+def test_every_entrant_s_requests_are_written_in_ascending_key_order(system, world, tmp_path):
+    assert make_streamed_requests(world, tmp_path / "run", system) == 0
+    requests = lines(tmp_path / "run" / "input" / "requests.jsonl")
+    keys = lines(tmp_path / "run" / "keys.jsonl")
+    assert [r["key"] for r in requests] == sorted(r["key"] for r in requests)
+    assert sorted(r["key"] for r in requests) == sorted(k["key"] for k in keys)
+    # keys.jsonl keeps the items' order, so the requests are not in it: a random permutation.
+    assert [r["key"] for r in requests] != [k["key"] for k in keys]
+    planned = harness.plan_requests(lines(world / "toy-data" / "questions.jsonl"), system, None,
+                                    (1, 2, 3))
+    assert [(k["id"], k["arm"], k["run"]) for k in keys] == [
+        (q["id"], arm, run) for q, arm, run in planned]
+    # Each request holds the fields of its entrant and a UUID4 key, in canonical form.
+    for request in requests:
+        assert set(request) == ({"key", "question"} if system == "closed-book"
+                                else {"key", "question", "context"})
+        assert str(uuid.UUID(request["key"], version=4)) == request["key"]
+
+
+def test_the_requests_follow_the_keys_and_not_the_items(world, tmp_path, monkeypatch):
+    counter = itertools.count()
+
+    def descending() -> uuid.UUID:
+        return uuid.UUID(int=(0xFFFF_FFFF - next(counter)) << 96, version=4)
+
+    monkeypatch.setattr(harness.uuid, "uuid4", descending)
+    assert make_streamed_requests(world, tmp_path / "run", "oracle") == 0
+    requests = lines(tmp_path / "run" / "input" / "requests.jsonl")
+    keys = lines(tmp_path / "run" / "keys.jsonl")
+    # The first item's keys are the largest, so the file ends with them and holds the last item's
+    # first.
+    assert [r["key"] for r in requests] == [k["key"] for k in reversed(keys)]

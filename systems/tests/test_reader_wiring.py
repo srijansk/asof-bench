@@ -292,9 +292,8 @@ def test_closed_book_s_inputs_are_the_question_and_nothing_else():
 
 
 def test_no_module_outside_the_tests_is_one_that_pytest_collects():
-    # pytest imports a file named test_*.py or *_test.py wherever `pytest systems` finds it (the
-    # reader's self-test was self_test.py, which it imported before the tests' conftest.py had
-    # put the shared package on the path).
+    # pytest imports any file named test_*.py or *_test.py that it finds under the directory it is
+    # given, so a module of the systems' own must not be named so.
     collected = ("test_*.py", "*_test.py")
     found = [path.relative_to(SYSTEMS) for path in SYSTEMS.rglob("*.py")
              if "tests" not in path.relative_to(SYSTEMS).parts[:1]

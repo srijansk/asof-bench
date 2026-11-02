@@ -2,19 +2,18 @@
 section 11): what each puts in a request's context and from which stream, on the toy world with
 its three streams registered in the manifest, and on synthetic streams for what the toy world
 lacks (a deleted proposal, a header without a status, a proposal of 1,600,000 characters); and the
-harness's reading of the streams (--streams-dir) and the order of the requests file. It needs git,
-which builds the toy world's repositories, and the asofbench package, so the reader image skips
-it; it makes no model call and reads no v0.1 file."""
+harness's reading of the streams (--streams-dir). The tests that hold for every entrant, the
+order of the requests file and plan.json, are in test_harness.py. It needs git, which builds the toy
+world's repositories, and the asofbench package, so the reader image skips it; it makes no model
+call and reads no v0.1 file."""
 
 from __future__ import annotations
 
 import hashlib
-import importlib.util
-import itertools
+import io
 import json
 import re
 import shutil
-import uuid
 from datetime import date
 from pathlib import Path
 
@@ -28,7 +27,6 @@ import harness  # noqa: E402 - systems/ is on the path (conftest.py)
 from asofbench_systems.stream import render_episode  # noqa: E402
 from reader import answer_requests  # noqa: E402
 
-from asofbench import cli  # noqa: E402
 from asofbench.stream import STREAM_FILES, unified_diff  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,22 +52,8 @@ def sha256(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def world(tmp_path_factory) -> Path:
-    """The toy world's repositories, built into questions and the three arms' streams by `asofbench
-    build --streams`, so that the manifest registers the streams: data/ and streams/."""
-    spec = importlib.util.spec_from_file_location("toy_world", ROOT / "examples" / "toy_world.py")
-    toy_world = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(toy_world)
-    root = tmp_path_factory.mktemp("toy-streams") / "world"
-    clones = toy_world.toy_clones(root / "clones")
-    assert cli.main(["build", "--clones", str(clones), "--out", str(root / "data"),
-                     "--streams", str(root / "streams")]) == 0
-    return root
-
-
-@pytest.fixture(scope="module")
 def questions(world) -> dict[str, dict]:
-    return {q["id"]: q for q in jsonl(world / "data" / "questions.jsonl")}
+    return {q["id"]: q for q in jsonl(world / "toy-data" / "questions.jsonl")}
 
 
 @pytest.fixture(scope="module")
@@ -84,7 +68,7 @@ def runs(world, tmp_path_factory) -> dict[str, Path]:
 
 def run_requests(world: Path, out: Path, system: str, *extra: str) -> int:
     streams = [] if system == "closed-book" else ["--streams-dir", str(world / "streams")]
-    return harness.main(["requests", "--system", system, "--data", str(world / "data"),
+    return harness.main(["requests", "--system", system, "--data", str(world / "toy-data"),
                          "--out-dir", str(out), *streams, *extra])
 
 
@@ -107,6 +91,16 @@ def contexts_of(pairs, item_id: str, arm: str) -> set[str]:
     """The contexts of one item in one arm, over its runs."""
     return {request["context"] for request, key in pairs
             if (key["id"], key["arm"]) == (item_id, arm)}
+
+
+def long_context_of(stream_path: Path, proposal: str) -> str:
+    """The long context of one proposal."""
+    return harness.long_contexts(stream_path, [proposal])[proposal]
+
+
+def oracle_context_of(stream_path: Path, corpus: str, day: date) -> str:
+    """The oracle's context for one corpus at the end of one day."""
+    return harness.oracle_contexts(stream_path, {(corpus, day)})[corpus, day]
 
 
 # --- the toy world: long context -----------------------------------------------------------------
@@ -223,9 +217,9 @@ def test_the_oracle_lists_the_proposals_present_at_the_end_of_the_date_as_the_he
     # The toy world has no item on a date before a proposal exists, so ask the builder directly:
     # on 2001-06-01 PEP-2 is not created yet, and on 2015-12-01 only ERC-20 exists.
     plus = world / "streams" / "h-plus.jsonl"
-    assert statements_of(harness.oracle_statements(plus, "pep", date(2001, 6, 1))) == [
+    assert statements_of(oracle_context_of(plus, "pep", date(2001, 6, 1))) == [
         "PEP-1: status Draft; requires -; replaces -; superseded-by -"]
-    assert statements_of(harness.oracle_statements(plus, "eth", date(2015, 12, 1))) == [
+    assert statements_of(oracle_context_of(plus, "eth", date(2015, 12, 1))) == [
         "ERC-20: status Draft; requires -; replaces -; superseded-by -"]
 
 
@@ -282,7 +276,7 @@ def test_the_oracle_context_holds_what_the_gold_of_every_toy_item_is_computed_fr
         world, questions, runs):
     # The ceiling's meaning: from its context alone, the toy world's items are all answerable.
     # The gold is the generator's own (its timelines, not this harness's replay).
-    gold = {g["id"]: g["gold"] for g in jsonl(world / "data" / "gold.jsonl")}
+    gold = {g["id"]: g["gold"] for g in jsonl(world / "toy-data" / "gold.jsonl")}
     checked = set()
     for request, key in written(runs["oracle"]):
         item = questions[key["id"]]
@@ -380,22 +374,22 @@ def test_a_proposal_deleted_or_not_yet_created_at_the_date_is_absent(tmp_path):
     # In ascending number (PEP-100 last, though "PEP-100" sorts before "PEP-11" as text); PEP-11 was
     # deleted before the date; PEP-13 is recorded in the date's last second; PEP-14 is created a
     # second after it.
-    assert proposals_of(harness.oracle_statements(path, "pep", date(2001, 12, 31))) == [
+    assert proposals_of(oracle_context_of(path, "pep", date(2001, 12, 31))) == [
         "PEP-9", "PEP-10", "PEP-12", "PEP-13", "PEP-100"]
     # A day later PEP-14 is there, and a day after the deletion PEP-12 is gone.
-    assert proposals_of(harness.oracle_statements(path, "pep", date(2002, 1, 1))) == [
+    assert proposals_of(oracle_context_of(path, "pep", date(2002, 1, 1))) == [
         "PEP-9", "PEP-10", "PEP-12", "PEP-13", "PEP-14", "PEP-100"]
-    assert proposals_of(harness.oracle_statements(path, "pep", date(2002, 2, 1))) == [
+    assert proposals_of(oracle_context_of(path, "pep", date(2002, 2, 1))) == [
         "PEP-9", "PEP-10", "PEP-13", "PEP-14", "PEP-100"]
     # Before the first episode no proposal is listed: the description and the blank line remain.
-    assert harness.oracle_statements(path, "pep", date(2000, 12, 31)) == ORACLE + "\n\n"
+    assert oracle_context_of(path, "pep", date(2000, 12, 31)) == ORACLE + "\n\n"
     # A proposal deleted and created again is listed from its second creation on.
     again = Stream()
     again.record("2001-01-01T12:00:00Z", "PEP-5", pep_text(5, "Status: Draft"))
     again.record("2001-02-01T12:00:00Z", "PEP-5", None)
     again.record("2001-03-01T12:00:00Z", "PEP-5", pep_text(5, "Status: Final"))
     path = again.write(tmp_path / "again.jsonl")
-    assert [proposals_of(harness.oracle_statements(path, "pep", date(2001, month, 15)))
+    assert [proposals_of(oracle_context_of(path, "pep", date(2001, month, 15)))
             for month in (1, 2, 3)] == [["PEP-5"], [], ["PEP-5"]]
 
 
@@ -416,12 +410,12 @@ def test_each_statement_is_the_header_as_the_file_recorded_it(tmp_path):
         5, "status: Draft", "replaces: 4", "superseded-by: 6"))
     stream.record("2001-01-01T12:06:00Z", "EIP-6", "Not a header at all.\n")
     path = stream.write(tmp_path / "h-plus.jsonl")
-    assert statements_of(harness.oracle_statements(path, "pep", date(2001, 1, 1))) == [
+    assert statements_of(oracle_context_of(path, "pep", date(2001, 1, 1))) == [
         "PEP-1: status Final; requires 3, 7; replaces 4, 5; superseded-by 9, 10",
         "PEP-2: status Incomplete; requires -; replaces -; superseded-by 8",
         "PEP-3: status -; requires -; replaces -; superseded-by -",
         "PEP-4: status -; requires -; replaces -; superseded-by -"]
-    assert statements_of(harness.oracle_statements(path, "eth", date(2001, 1, 1))) == [
+    assert statements_of(oracle_context_of(path, "eth", date(2001, 1, 1))) == [
         "EIP-5: status Draft; requires -; replaces 4; superseded-by 6",
         "EIP-6: status -; requires -; replaces -; superseded-by -",
         "EIP-1559: status Last Call; requires 1, 2718; replaces -; superseded-by -"]
@@ -435,14 +429,14 @@ def test_the_oracle_reads_the_header_in_effect_at_the_date_and_lists_only_its_ow
     stream.record("2001-06-01T12:00:00Z", "PEP-1", pep_text(1, "Status: Final", "Requires: 2"))
     stream.record("2001-09-01T12:00:00Z", "ERC-20", eip_text(20, "status: Final"), repo="ERCs")
     path = stream.write(tmp_path / "h-plus.jsonl")
-    assert statements_of(harness.oracle_statements(path, "pep", date(2001, 5, 31))) == [
+    assert statements_of(oracle_context_of(path, "pep", date(2001, 5, 31))) == [
         "PEP-1: status Draft; requires -; replaces -; superseded-by -"]
-    assert statements_of(harness.oracle_statements(path, "pep", date(2001, 6, 1))) == [
+    assert statements_of(oracle_context_of(path, "pep", date(2001, 6, 1))) == [
         "PEP-1: status Final; requires 2; replaces -; superseded-by -"]
     # The Ethereum proposal that moved to the ERC repository is one entry, under its id at S.
-    assert statements_of(harness.oracle_statements(path, "eth", date(2001, 8, 31))) == [
+    assert statements_of(oracle_context_of(path, "eth", date(2001, 8, 31))) == [
         "ERC-20: status Draft; requires -; replaces -; superseded-by -"]
-    assert statements_of(harness.oracle_statements(path, "eth", date(2001, 9, 1))) == [
+    assert statements_of(oracle_context_of(path, "eth", date(2001, 9, 1))) == [
         "ERC-20: status Final; requires -; replaces -; superseded-by -"]
 
 
@@ -454,20 +448,20 @@ def test_a_stream_that_cannot_be_replayed_is_refused_not_listed(tmp_path):
     broken = path.read_text(encoding="utf-8").replace("-Status: Draft", "-Status: Other")
     (tmp_path / "broken.jsonl").write_text(broken, encoding="utf-8")
     with pytest.raises(harness.Refused, match=r"broken\.jsonl line 2"):
-        harness.oracle_statements(tmp_path / "broken.jsonl", "pep", date(2001, 3, 1))
+        oracle_context_of(tmp_path / "broken.jsonl", "pep", date(2001, 3, 1))
     (tmp_path / "text.jsonl").write_text("not json\n", encoding="utf-8")
     with pytest.raises(harness.Refused, match=r"text\.jsonl line 1: not JSON"):
-        harness.oracle_statements(tmp_path / "text.jsonl", "pep", date(2001, 3, 1))
+        oracle_context_of(tmp_path / "text.jsonl", "pep", date(2001, 3, 1))
     (tmp_path / "bytes.jsonl").write_bytes(b'{"a": "\xff"}\n')
     with pytest.raises(harness.Refused, match="not UTF-8"):
-        harness.oracle_statements(tmp_path / "bytes.jsonl", "pep", date(2001, 3, 1))
+        oracle_context_of(tmp_path / "bytes.jsonl", "pep", date(2001, 3, 1))
     with pytest.raises(harness.Refused, match="cannot be read"):
-        harness.oracle_statements(tmp_path / "missing.jsonl", "pep", date(2001, 3, 1))
+        oracle_context_of(tmp_path / "missing.jsonl", "pep", date(2001, 3, 1))
     # An episode that cannot be rendered (a kind that no template knows) is refused as well.
     odd = [{**stream.episodes[0], "kind": "copy"}]
     (tmp_path / "odd.jsonl").write_text(json.dumps(odd[0]) + "\n", encoding="utf-8")
     with pytest.raises(harness.Refused, match="odd.jsonl"):
-        harness.long_context(tmp_path / "odd.jsonl", "PEP-1")
+        long_context_of(tmp_path / "odd.jsonl", "PEP-1")
 
 
 def test_one_replay_gives_every_corpus_and_date_asked_and_the_same_text_as_one_call_each(tmp_path):
@@ -480,7 +474,7 @@ def test_one_replay_gives_every_corpus_and_date_asked_and_the_same_text_as_one_c
     together = harness.oracle_contexts(path, wanted)
     assert set(together) == wanted
     for corpus, day in wanted:
-        assert together[corpus, day] == harness.oracle_statements(path, corpus, day)
+        assert together[corpus, day] == oracle_context_of(path, corpus, day)
     assert harness.oracle_contexts(path, set()) == {}
 
 
@@ -494,16 +488,16 @@ def test_long_context_is_the_proposal_s_episodes_in_stream_order_and_no_other(tm
     third = stream.record("2001-05-01T12:00:00Z", "PEP-1", None)
     fourth = stream.record("2001-06-01T12:00:00Z", "PEP-1", pep_text(1, "Status: Draft"))
     path = stream.write(tmp_path / "h-plus.jsonl")
-    context = harness.long_context(path, "PEP-1")
+    context = long_context_of(path, "PEP-1")
     assert context == (LONG_CONTEXT + "\n\n" + SEPARATOR.join(
         render_episode(e) for e in (first, second, third, fourth)))
     assert third["kind"] == "delete" and "The file was deleted." in context
     assert "With a second paragraph." in context
     assert all(e["commit"] not in context for e in stream.episodes if e["proposal"] == "PEP-2")
     assert harness.long_contexts(path, ["PEP-1", "PEP-2"]) == {
-        "PEP-1": context, "PEP-2": harness.long_context(path, "PEP-2")}
+        "PEP-1": context, "PEP-2": long_context_of(path, "PEP-2")}
     with pytest.raises(harness.Refused, match="holds no episode of PEP-3"):
-        harness.long_context(path, "PEP-3")
+        long_context_of(path, "PEP-3")
 
 
 def test_a_proposal_of_1_600_000_characters_is_sent_whole(tmp_path):
@@ -651,7 +645,7 @@ def test_a_question_without_a_corpus_a_proposal_that_is_text_or_a_date_is_refuse
                          str(tmp_path / "run-five"), "--streams-dir", str(streams)]) == 0
 
 
-# --- the harness: the streams it reads, plan.json, the order of the requests ---------------------
+# --- the harness: the streams it reads ---------------------------------------------------------
 
 
 def test_each_distinct_stream_corpus_and_date_is_computed_once(world, questions, tmp_path,
@@ -684,73 +678,88 @@ def test_each_distinct_stream_corpus_and_date_is_computed_once(world, questions,
                                if name == where})
     # Long context reads each arm's stream once, not once for each proposal or request.
     reads = []
-    read_episodes = harness.read_episodes
-    monkeypatch.setattr(harness, "read_episodes", lambda path: reads.append(Path(path).name)
-                        or read_episodes(path))
+    checked_lines = harness.checked_lines
+    monkeypatch.setattr(harness, "checked_lines", lambda path, registered=None: (
+        reads.append(Path(path).name) or checked_lines(path, registered)))
     assert run_requests(world, tmp_path / "long-context", "long-context") == 0
     assert sorted(reads) == ["cf.jsonl", "h-minus.jsonl", "h-plus.jsonl"]
 
 
-def test_plan_json_names_the_streams_a_run_read_and_closed_book_reads_none(world, tmp_path):
-    for system, arms in (("long-context", ["CF", "H+", "H-"]), ("oracle", ["CF", "H+"])):
-        assert run_requests(world, tmp_path / system, system) == 0
-        plan = json.loads((tmp_path / system / "plan.json").read_text(encoding="utf-8"))
-        assert plan["system"] == system
-        assert plan["streams"] == {arm: {"file": STREAM_FILES[arm],
-                                         "sha256": sha256(world / "streams" / STREAM_FILES[arm])}
-                                   for arm in arms}
-        assert str(tmp_path) not in json.dumps(plan) and str(ROOT) not in json.dumps(plan)
-        assert plan["requests_sha256"] == sha256(tmp_path / system / "input" / "requests.jsonl")
-        assert plan["keys_sha256"] == sha256(tmp_path / system / "keys.jsonl")
-        assert sorted(p.name for p in (tmp_path / system).iterdir()) == [
-            "input", "keys.jsonl", "output", "plan.json"]
-        assert sorted(p.name for p in (tmp_path / system / "input").iterdir()) == [
-            "requests.jsonl"]
-    # Only the streams the asked items need are read: one counterfactual item reads cf.jsonl.
-    one = tmp_path / "one.json"
-    one.write_text(json.dumps(["CF-counterfactual-PEP-1-2013-09-02"]), encoding="utf-8")
-    assert run_requests(world, tmp_path / "cf-only", "oracle", "--items", str(one),
-                        "--runs", "2") == 0
-    plan = json.loads((tmp_path / "cf-only" / "plan.json").read_text(encoding="utf-8"))
-    assert list(plan["streams"]) == ["CF"] and plan["requests"] == 1
-    assert run_requests(world, tmp_path / "closed", "closed-book") == 0
-    plan = json.loads((tmp_path / "closed" / "plan.json").read_text(encoding="utf-8"))
-    assert plan["streams"] is None
+def test_a_stream_is_used_only_if_the_bytes_parsed_hash_to_the_registered_digest(tmp_path):
+    stream = Stream()
+    stream.record("2001-01-01T12:00:00Z", "PEP-1", pep_text(1, "Status: Draft"))
+    stream.record("2001-02-01T12:00:00Z", "PEP-1", pep_text(1, "Status: Final"))
+    stream.record("2001-03-01T12:00:00Z", "PEP-2", pep_text(2, "Status: Draft"))
+    path = stream.write(tmp_path / "h-plus.jsonl")
+    digest, wrong = sha256(path), "0" * 64
+    wanted = {("pep", date(2001, 2, 15))}
+    builds = {"long": lambda registered: harness.long_contexts(path, ["PEP-1"], registered),
+              "oracle": lambda registered: harness.oracle_contexts(path, wanted, registered)}
+    for build in builds.values():
+        assert build(digest) == build(None)
+        with pytest.raises(harness.Refused, match=rf"h-plus\.jsonl changed after it was checked.*"
+                           rf"{digest}.*{wrong}"):
+            build(wrong)
+    # The bytes parsed are what is hashed, not the file at rest: a view of the file with its last
+    # line missing, as a writer rewriting it in place would give a reader, is refused although the
+    # file on disk is the registered one.
+    real_open = open
+
+    def cut_short(name, mode="r", *args, **kwargs):
+        if Path(name).name == "h-plus.jsonl" and "b" in mode:
+            with real_open(name, "rb") as handle:
+                data = handle.read()
+            return io.BytesIO(data[:data.rindex(b"\n", 0, len(data) - 1) + 1])
+        return real_open(name, mode, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(harness, "open", cut_short, raising=False)
+        for build in builds.values():
+            with pytest.raises(harness.Refused, match="changed after it was checked"):
+                build(digest)
+    assert sha256(path) == digest
+    for build in builds.values():
+        build(digest)
 
 
-@pytest.mark.parametrize("system", ["closed-book", "long-context", "oracle"])
-def test_every_entrant_s_requests_are_written_in_ascending_key_order(system, world, tmp_path):
-    assert run_requests(world, tmp_path / "run", system) == 0
-    requests = jsonl(tmp_path / "run" / "input" / "requests.jsonl")
-    keys = jsonl(tmp_path / "run" / "keys.jsonl")
-    assert [r["key"] for r in requests] == sorted(r["key"] for r in requests)
-    assert sorted(r["key"] for r in requests) == sorted(k["key"] for k in keys)
-    # keys.jsonl keeps the items' order, so the requests are not in it: a random permutation.
-    assert [r["key"] for r in requests] != [k["key"] for k in keys]
-    planned = harness.plan_requests(list(jsonl(world / "data" / "questions.jsonl")), system, None,
-                                    (1, 2, 3))
-    assert [(k["id"], k["arm"], k["run"]) for k in keys] == [
-        (q["id"], arm, run) for q, arm, run in planned]
-    # Each request holds the fields of its entrant and a UUID4 key, in canonical form.
-    for request in requests:
-        assert set(request) == ({"key", "question"} if system == "closed-book"
-                                else {"key", "question", "context"})
-        assert str(uuid.UUID(request["key"], version=4)) == request["key"]
+def test_a_stream_that_changes_after_the_check_is_refused_and_nothing_is_written(
+        world, tmp_path, monkeypatch, capsys):
+    real = harness.registered_streams
+
+    def checked_then_changed(arms, streams_dir, manifest, manifest_path):
+        found = real(arms, streams_dir, manifest, manifest_path)
+        # The check has passed. Now each stream is replaced by one that parses as well.
+        for path, _ in found.values():
+            path.write_text(path.read_text(encoding="utf-8").replace("Update", "Edited"),
+                            encoding="utf-8")
+        return found
+
+    monkeypatch.setattr(harness, "registered_streams", checked_then_changed)
+    for system in ("long-context", "oracle"):
+        streams = tmp_path / f"streams-{system}"
+        shutil.copytree(world / "streams", streams)
+        assert harness.main(["requests", "--system", system, "--data", str(world / "toy-data"),
+                             "--out-dir", str(tmp_path / system), "--streams-dir",
+                             str(streams)]) == 2, system
+        assert not (tmp_path / system).exists()
+        assert "changed after it was checked" in capsys.readouterr().err
 
 
-def test_the_requests_follow_the_keys_and_not_the_items(world, tmp_path, monkeypatch):
-    counter = itertools.count()
+def test_the_configs_and_the_harness_name_the_builders_that_requests_calls():
+    # One name for each builder: the function that `requests` calls, in the module's description
+    # and in the entrant's configuration, and no other function named like it.
+    family = {"long_context", "long_contexts", "oracle_context", "oracle_contexts",
+              "oracle_statement", "oracle_statements"}
 
-    def descending() -> uuid.UUID:
-        return uuid.UUID(int=(0xFFFF_FFFF - next(counter)) << 96, version=4)
+    def named(text: str) -> set[str]:
+        return set(re.findall(r"[A-Za-z_]+", text)) & family
 
-    monkeypatch.setattr(harness.uuid, "uuid4", descending)
-    assert run_requests(world, tmp_path / "run", "oracle") == 0
-    requests = jsonl(tmp_path / "run" / "input" / "requests.jsonl")
-    keys = jsonl(tmp_path / "run" / "keys.jsonl")
-    # The first item's keys are the largest, so the file ends with them and holds the last item's
-    # first.
-    assert [r["key"] for r in requests] == [k["key"] for k in reversed(keys)]
+    for system, builder in (("long-context", "long_contexts"), ("oracle", "oracle_contexts")):
+        text = (SYSTEMS / system / "config.json").read_text(encoding="utf-8")
+        assert named(text) == {builder}, system
+        assert callable(getattr(harness, builder))
+    assert named(harness.__doc__) == {"long_contexts", "oracle_contexts"}
+    assert family & set(vars(harness)) == {"long_contexts", "oracle_contexts"}
 
 
 def test_no_request_carries_the_item_and_the_reader_accepts_every_request_file(world, questions,
@@ -768,7 +777,7 @@ def test_no_request_carries_the_item_and_the_reader_accepts_every_request_file(w
 
 
 def test_a_run_that_cannot_read_its_streams_is_refused_and_writes_nothing(world, tmp_path, capsys):
-    data = str(world / "data")
+    data = str(world / "toy-data")
 
     def attempt(name: str, system: str, *extra: str) -> int:
         return harness.main(["requests", "--system", system, "--data", data, "--out-dir",
@@ -792,7 +801,7 @@ def test_a_run_that_cannot_read_its_streams_is_refused_and_writes_nothing(world,
     assert attempt("edited-run", "oracle", "--streams-dir", str(edited)) == 2
     assert "registers" in capsys.readouterr().err
     bare = tmp_path / "bare"
-    shutil.copytree(world / "data", bare)
+    shutil.copytree(world / "toy-data", bare)
     manifest = json.loads((bare / "MANIFEST.json").read_text(encoding="utf-8"))
     manifest["streams"] = None
     (bare / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")

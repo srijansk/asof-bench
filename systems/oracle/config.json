@@ -1,6 +1,6 @@
 {
   "system": "oracle",
-  "description": "The oracle statement store, reported as a ceiling only (PREREGISTRATION.md section 11): the answering model receives the question and, as its context, the statements in effect at the end of the item's date for every proposal of the item's corpus. It ingests no stream: systems/harness.py replays the stream on the host (oracle_statements) and writes the statements into the request, and the reader image (systems/reader) answers the requests, unchanged, with asofbench_systems.answer.answer_once; systems/README.md describes both.",
+  "description": "The oracle statement store, reported as a ceiling only (PREREGISTRATION.md section 11): the answering model receives the question and, as its context, the statements in effect at the end of the item's date for every proposal of the item's corpus. It ingests no stream: systems/harness.py replays the stream on the host (oracle_contexts) and writes the statements into the request, and the reader image (systems/reader) answers the requests, unchanged, with asofbench_systems.answer.answer_once; systems/README.md describes both.",
   "inputs": "the statements in effect at the end of the item's date for every proposal of its corpus, from the headers as recorded (CF: as the counterfactual stream edits them); it ingests no stream",
   "entries": "every item in every arm that its arms field lists (section 12), each three times (runs 1, 2 and 3); in a pilot run, the items of a list such as data/v0.1/pilot.json (harness.py requests --items); harness.py requests --streams-dir names the directory that holds the streams. It is reported as a ceiling and never compared with the entrants",
   "requests": {
@@ -32,7 +32,7 @@
     "streams": {
       "H+": "an H+ item and an H- item read the H+ stream (h-plus.jsonl): the oracle reads the headers as recorded in both arms (section 11)",
       "CF": "a CF item reads the counterfactual stream (cf.jsonl): the headers as it edits them",
-      "check": "the harness reads a stream only after checking its SHA-256 against the one that the build's MANIFEST.json registers for the arm, and records each stream's name and SHA-256 in plan.json"
+      "check": "the harness checks a stream's SHA-256 against the one that the build's MANIFEST.json registers for the arm before it reads the stream, hashes the bytes again as it parses them and refuses the stream unless they have the same SHA-256 (so a stream that changes after the check, or is not whole when it is read, is refused and nothing is written), and records each stream's name and SHA-256 in plan.json"
     },
     "replay": "asofbench.materialize.replay applies the stream's episodes recorded at or before the end of the item's date (23:59:59 UTC) in stream order: a create gives a proposal its file, a modify or rename applies its diff, and a delete takes the file away, so a proposal deleted before the date, or not yet created, is not listed; an item's date is its as_of field, which is S for F2 and F3",
     "built": "each distinct (stream, corpus, date) once, by one replay of each stream for all its dates (harness.oracle_contexts), however many items and runs ask it",

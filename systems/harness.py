@@ -39,18 +39,20 @@ pilot's items, and ``--runs`` (by default 1,2,3) to some of the three runs.
 **Contexts.** Closed book receives the question alone. Long context and the oracle receive a
 ``context`` as well, which the harness builds on the host from the arms' streams, ``--streams-dir``
 (a directory holding the generator's files h-plus.jsonl, h-minus.jsonl and cf.jsonl; closed book
-is given none). A stream is read only after its SHA-256 is checked against the one that the
-build's manifest registers for the arm, and every stream and every context is built before the
-run directory is made, so that a stream the harness refuses leaves nothing behind. A context
-begins with a description of itself (``LONG_CONTEXT_DESCRIPTION``, ``ORACLE_DESCRIPTION``), a
-blank line following it:
+is given none). A stream's SHA-256 is checked against the one that the build's manifest registers
+for the arm before the stream is read, and the bytes of the pass that parses it are hashed as
+they are read (``checked_lines``) and must hash to the same, so that a stream that changes after
+the check, or is not whole when it is read, is refused and the contexts built from it are never
+used. Every stream is read and every context built before the run directory is made, so that a
+stream the harness refuses leaves nothing behind. A context begins with a description of itself
+(``LONG_CONTEXT_DESCRIPTION``, ``ORACLE_DESCRIPTION``), a blank line following it:
 
-- long context (``long_context``): every episode of the proposal that the item names, in the
+- long context (``long_contexts``): every episode of the proposal that the item names, in the
   item's arm's stream (H+, H- or CF), in stream order, those recorded after the item's date
   included, each as ``asofbench_systems.stream.render_episode`` renders it, joined by a line
   ``---``. Nothing is cut: a request over the model's window fails at the API as that request's
   own ``api_error`` and gets a null answer. Each stream is read once for all its proposals;
-- the oracle (``oracle_statements``): one line for every proposal of the item's corpus that has a
+- the oracle (``oracle_contexts``): one line for every proposal of the item's corpus that has a
   file at the end of the item's date, in ascending number, ``{proposal}: status {status};
   requires {list or -}; replaces {list or -}; superseded-by {list or -}``, from the file's header
   as recorded (``statement``). The files come from ``asofbench.materialize.replay`` of the H+
@@ -87,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -117,7 +120,7 @@ from asofbench_systems.run import (  # noqa: E402
     write_json,
     write_text_atomically,
 )
-from asofbench_systems.stream import read_episodes, render_episode  # noqa: E402
+from asofbench_systems.stream import episodes_of, render_episode  # noqa: E402
 
 from asofbench import headers, materialize, scoring  # noqa: E402
 from asofbench.corpora import REPOS  # noqa: E402
@@ -305,19 +308,37 @@ def reading(path: Path) -> Iterator[None]:
     except KeyError as error:
         raise Refused(f"{path.name}: an episode lacks the field {error}") from None
     except ValueError as error:
-        raise Refused(f"{path.name}: {str(error).removeprefix(f'{path}: ')}") from None
+        raise Refused(f"{path.name}: {str(error).removeprefix(f'{path.name}: ')}") from None
 
 
-def long_contexts(stream_path: Path, proposals: Collection[str]) -> dict[str, str]:
+def checked_lines(path: Path, registered: str | None = None) -> Iterator[bytes]:
+    """The lines of the stream file at ``path``, as bytes, split at newlines only, hashed as they
+    are read: when the last line has been given, Refused unless the SHA-256 of the bytes that were
+    read is ``registered`` (nothing is checked for None). A reader that parses these lines to the
+    end has therefore parsed the registered stream and no other, whatever becomes of the file
+    meanwhile; what it built from a pass that is refused is never used."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for raw in handle:
+            digest.update(raw)
+            yield raw
+    if registered is not None and digest.hexdigest() != registered:
+        raise Refused(f"{path.name} changed after it was checked: the bytes read from it have the "
+                      f"SHA-256 {digest.hexdigest()}, not {registered}, which the build's "
+                      f"manifest ({MANIFEST}) registers")
+
+
+def long_contexts(stream_path: Path, proposals: Collection[str],
+                  registered: str | None = None) -> dict[str, str]:
     """The long context of each of ``proposals`` (ids at S, such as ``PEP-8``) in the stream at
-    ``stream_path``, by one reading of the stream: the first line is
-    ``LONG_CONTEXT_DESCRIPTION``, a blank line follows, and then every episode of the proposal that
-    the stream holds, those recorded after the item's date included, in the stream's order, each as
-    ``render_episode`` renders it, joined by a line ``---``. Nothing is cut, however long. Refused
-    for a proposal with no episode in the stream."""
+    ``stream_path``, by one reading of the stream (``checked_lines`` with ``registered``): the
+    first line is ``LONG_CONTEXT_DESCRIPTION``, a blank line follows, and then every episode of
+    the proposal that the stream holds, those recorded after the item's date included, in the
+    stream's order, each as ``render_episode`` renders it, joined by a line ``---``. Nothing is
+    cut, however long. Refused for a proposal with no episode in the stream."""
     rendered: dict[str, list[str]] = {proposal: [] for proposal in proposals}
     with reading(stream_path):
-        for episode in read_episodes(str(stream_path)):
+        for episode in episodes_of(checked_lines(stream_path, registered), stream_path.name):
             found = rendered.get(episode["proposal"])
             if found is not None:
                 found.append(render_episode(episode))
@@ -326,11 +347,6 @@ def long_contexts(stream_path: Path, proposals: Collection[str]) -> dict[str, st
             raise Refused(f"{stream_path.name} holds no episode of {proposal}")
     return {proposal: f"{LONG_CONTEXT_DESCRIPTION}\n\n{EPISODE_SEPARATOR.join(pieces)}"
             for proposal, pieces in rendered.items()}
-
-
-def long_context(stream_path: Path, proposal: str) -> str:
-    """The long context of ``proposal`` in the stream at ``stream_path`` (``long_contexts``)."""
-    return long_contexts(stream_path, [proposal])[proposal]
 
 
 def number_of(proposal: str) -> int:
@@ -361,25 +377,27 @@ def statements(files: dict[tuple[str, str], str], corpus: str) -> str:
     ``materialize.replay`` gives them): the first line is ``ORACLE_DESCRIPTION``, a blank line
     follows, and then one ``statement`` for every proposal of ``corpus`` that has a file, in
     ascending number."""
-    present = sorted((key for key in files if REPOS[key[0]].family == corpus),
-                     key=lambda key: (number_of(key[1]), key[1]))
+    present = sorted((number_of(proposal), proposal, repo)
+                     for repo, proposal in files if REPOS[repo].family == corpus)
     return f"{ORACLE_DESCRIPTION}\n\n" + "\n".join(
-        statement(proposal, corpus, files[repo, proposal]) for repo, proposal in present)
+        statement(proposal, corpus, files[repo, proposal]) for _, proposal, repo in present)
 
 
-def replayed(stream_path: Path, days: Collection[date]
+def replayed(stream_path: Path, days: Collection[date], registered: str | None = None
              ) -> Iterator[tuple[date, dict[tuple[str, str], str]]]:
     """Each of ``days``, in date order, with the files as of its end, ``(repo, proposal) -> text``:
-    ``asofbench.materialize.replay`` of the stream at ``stream_path``, which Refused tells apart
-    from the harness's own errors (``reading``)."""
-    with reading(stream_path), open(stream_path, encoding="utf-8", newline="\n") as lines:
+    ``asofbench.materialize.replay`` of the lines of the stream at ``stream_path`` as
+    ``checked_lines`` gives them (with ``registered``), which Refused tells apart from the
+    harness's own errors (``reading``)."""
+    with reading(stream_path):
+        lines = (raw.decode("utf-8") for raw in checked_lines(stream_path, registered))
         yield from materialize.replay(lines, days, where=stream_path.name)
 
 
-def oracle_contexts(stream_path: Path, wanted: Collection[tuple[str, date]]
-                    ) -> dict[tuple[str, date], str]:
+def oracle_contexts(stream_path: Path, wanted: Collection[tuple[str, date]],
+                    registered: str | None = None) -> dict[tuple[str, date], str]:
     """The oracle's context for each ``(corpus, day)`` of ``wanted``, in the stream at
-    ``stream_path``, which one replay of it (``asofbench.materialize.replay``) serves for all of
+    ``stream_path``, which one replay of it (``replayed``, with ``registered``) serves for all of
     them: the proposals that its files hold at the end of ``day`` (the episodes recorded by
     ``day`` 23:59:59 UTC, applied in stream order, a deleted proposal gone and one not yet created
     not there), as ``statements`` lists them."""
@@ -389,16 +407,10 @@ def oracle_contexts(stream_path: Path, wanted: Collection[tuple[str, date]]
     found: dict[tuple[str, date], str] = {}
     if not corpora:
         return found
-    for day, files in replayed(stream_path, corpora):
+    for day, files in replayed(stream_path, corpora, registered):
         for corpus in corpora[day]:
             found[corpus, day] = statements(files, corpus)
     return found
-
-
-def oracle_statements(stream_path: Path, corpus: str, day: date) -> str:
-    """The oracle's context for ``corpus`` at the end of ``day``, in the stream at
-    ``stream_path`` (``oracle_contexts``)."""
-    return oracle_contexts(stream_path, {(corpus, day)})[corpus, day]
 
 
 def stream_arm(system: str, arm: str) -> str:
@@ -408,17 +420,21 @@ def stream_arm(system: str, arm: str) -> str:
     return "H+" if system == "oracle" and arm != "CF" else arm
 
 
-def long_context_builder(planned: list[tuple[dict, str, int]], streams: dict[str, Path]
-                         ) -> Callable[[dict, str], str]:
+def long_context_builder(planned: list[tuple[dict, str, int]],
+                         streams: dict[str, tuple[Path, str]]) -> Callable[[dict, str], str]:
     """The function that gives a request of long context its context, from the planned items and
-    the paths of the streams of their arms: each stream is read once, for all of its proposals."""
+    the streams of their arms, each with the SHA-256 that its bytes must have: each stream is read
+    once, for all of its proposals (``long_contexts``)."""
     wanted: dict[str, set[str]] = {}
     for q, arm, _ in planned:
         if q["proposal"] is None:
             raise Refused(f"{q['id']} names no proposal, so long context has nothing to read "
                           "for it")
         wanted.setdefault(arm, set()).add(q["proposal"])
-    contexts = {arm: long_contexts(streams[arm], proposals) for arm, proposals in wanted.items()}
+    contexts = {}
+    for arm, proposals in wanted.items():
+        path, registered = streams[arm]
+        contexts[arm] = long_contexts(path, proposals, registered)
 
     def context_of(q: dict, arm: str) -> str:
         return contexts[arm][q["proposal"]]
@@ -426,16 +442,20 @@ def long_context_builder(planned: list[tuple[dict, str, int]], streams: dict[str
     return context_of
 
 
-def oracle_builder(planned: list[tuple[dict, str, int]], streams: dict[str, Path]
-                   ) -> Callable[[dict, str], str]:
+def oracle_builder(planned: list[tuple[dict, str, int]],
+                   streams: dict[str, tuple[Path, str]]) -> Callable[[dict, str], str]:
     """The function that gives a request of the oracle its context, from the planned items and the
-    paths of the streams it reads: each stream is replayed once, and each distinct corpus and date
-    that its items ask is computed once."""
+    streams it reads, each with the SHA-256 that its bytes must have: each stream is replayed once,
+    and each distinct corpus and date that its items ask is computed once
+    (``oracle_contexts``)."""
     wanted: dict[str, set[tuple[str, date]]] = {}
     for q, arm, _ in planned:
         wanted.setdefault(stream_arm("oracle", arm), set()).add(
             (q["corpus"], date.fromisoformat(q["as_of"])))
-    contexts = {arm: oracle_contexts(streams[arm], days) for arm, days in wanted.items()}
+    contexts = {}
+    for arm, days in wanted.items():
+        path, registered = streams[arm]
+        contexts[arm] = oracle_contexts(path, days, registered)
 
     def context_of(q: dict, arm: str) -> str:
         return contexts[stream_arm("oracle", arm)][q["corpus"], date.fromisoformat(q["as_of"])]
@@ -444,8 +464,8 @@ def oracle_builder(planned: list[tuple[dict, str, int]], streams: dict[str, Path
 
 
 # The systems whose requests the harness writes, each with the function that builds, from the
-# planned items and the paths of the streams it reads, the function that gives a request its
-# context; or None for a system that receives the question alone (closed book).
+# planned items and the streams it reads (arm to path and SHA-256), the function that gives a
+# request its context; or None for a system that receives the question alone (closed book).
 CONTEXTS = {"closed-book": None, "long-context": long_context_builder, "oracle": oracle_builder}
 
 
@@ -453,7 +473,10 @@ def registered_streams(arms: Collection[str], streams_dir: Path, manifest: dict,
                        manifest_path: Path) -> dict[str, tuple[Path, str]]:
     """The stream of each of ``arms`` in ``streams_dir`` under the generator's name for it, with
     its SHA-256, after checking it against the SHA-256 that the build's manifest registers for the
-    arm; Refused when it is not there, the manifest registers none, or they differ."""
+    arm; Refused when it is not there, the manifest registers none, or they differ. This check
+    refuses a wrong stream at once and by name; the pass that parses the stream hashes the bytes it
+    parses again (``checked_lines``), which is what makes the digest recorded in plan.json the
+    digest of what the contexts were built from."""
     found = {}
     for arm in sorted(arms):
         path = streams_dir / STREAM_FILES[arm]
@@ -512,7 +535,7 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
     if builder is not None:
         streams = registered_streams({stream_arm(system, arm) for _, arm, _ in planned},
                                      streams_dir, manifest, data / MANIFEST)
-        context_of = builder(planned, {arm: path for arm, (path, _) in streams.items()})
+        context_of = builder(planned, streams)
     requests_path, keys_path = out_dir / INPUT / REQUESTS, out_dir / KEYS
     pending_requests, pending_keys = temporary_path(requests_path), temporary_path(keys_path)
     (out_dir / INPUT).mkdir(parents=True)

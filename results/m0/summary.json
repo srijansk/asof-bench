@@ -1,0 +1,75 @@
+{
+  "arm": "H+",
+  "stream": "m0-h-plus.jsonl",
+  "stream_sha256": "c188c3050d15449c441acc37bd24669d77e19148d9d46186d1a105a728fc8010",
+  "episodes": 1441,
+  "ok": 1441,
+  "failed": 0,
+  "text_chars": 3651707,
+  "input_tokens": 53227395,
+  "output_tokens": 3034457,
+  "calls": 12099,
+  "api_errors": 0,
+  "by_outcome": {
+    "ingested": {
+      "input_tokens": 53003273,
+      "output_tokens": 3008803,
+      "calls": 12048,
+      "api_errors": 0
+    },
+    "failed": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "calls": 0,
+      "api_errors": 0
+    },
+    "stopped": {
+      "input_tokens": 224122,
+      "output_tokens": 25654,
+      "calls": 51,
+      "api_errors": 0
+    },
+    "unknown": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "calls": 0,
+      "api_errors": 0
+    }
+  },
+  "calls_over_100k_input": 0,
+  "removal": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "calls": 0,
+    "api_errors": 0
+  },
+  "unattributed": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "calls": 0,
+    "api_errors": 0
+  },
+  "wall_s": 18253.679,
+  "elapsed_s": 18436.427,
+  "invocations": 6,
+  "exit": 0,
+  "graphiti_core": "0.31.2",
+  "model": "claude-haiku-5-5",
+  "response_models": [
+    "claude-haiku-5-5"
+  ],
+  "images": {
+    "graphiti": [
+      "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc"
+    ],
+    "egress": [
+      "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6"
+    ],
+    "embedder": [
+      "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b"
+    ],
+    "neo4j": [
+      "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+    ]
+  }
+}

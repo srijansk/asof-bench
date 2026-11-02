@@ -1,0 +1,15 @@
+# M0 operational override from invocation 6 on: memory settings only, with no effect on any result.
+# The embedding server's glibc allocator, as m0-embedder-override.yaml set it from invocation 4
+# (two arenas and a fixed 128 KiB mmap threshold, so freed activation buffers return to the
+# system), and Neo4j's container limit raised from 1 GiB to 1.5 GiB: its heap (512 MiB at most)
+# and page cache (128 MiB) are unchanged, but its JVM's native memory took the container to the
+# 1 GiB limit within minutes of each restart once the store held about 900 episodes, and Neo4j
+# restarted three times between 05:18 and 08:42 UTC, the third one stopping the run.
+services:
+  embedder:
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+      MALLOC_TRIM_THRESHOLD_: "131072"
+  neo4j:
+    mem_limit: 1536m

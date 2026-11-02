@@ -1,0 +1,45 @@
+{
+  "stream": "m0-h-plus.jsonl",
+  "stream_sha256": "c188c3050d15449c441acc37bd24669d77e19148d9d46186d1a105a728fc8010",
+  "arm": "H+",
+  "invocations": [
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T03:05:44Z",
+      "resume": false,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:2f2fcc2a41de553c1fd71a07b524312c2086d56384f5b8f6076d2b8ebe43ea27",
+        "egress": "sha256:af70a6785528fa03c22d75177fbcdcad71191d0c739d692c9de846e7b5577dc5",
+        "embedder": "sha256:108701915df4261e19ea3315eb5192745ab4cea9740983b69662014945aaa4e1",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 126.565,
+      "exit": 2,
+      "stop": {
+        "episode_id": "156e7dfa3581:PEP-223",
+        "error": "openai APIConnectionError"
+      },
+      "crash": null
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T03:11:07Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:2f2fcc2a41de553c1fd71a07b524312c2086d56384f5b8f6076d2b8ebe43ea27",
+        "egress": "sha256:af70a6785528fa03c22d75177fbcdcad71191d0c739d692c9de846e7b5577dc5",
+        "embedder": "sha256:108701915df4261e19ea3315eb5192745ab4cea9740983b69662014945aaa4e1",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 327.174,
+      "exit": 2,
+      "stop": {
+        "episode_id": "c22397f038e3:PEP-252",
+        "error": "openai APIConnectionError"
+      },
+      "crash": null
+    }
+  ]
+}

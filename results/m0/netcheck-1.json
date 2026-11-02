@@ -1,0 +1,187 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "kind": "allow",
+      "target": "api.anthropic.com:443",
+      "ok": true,
+      "detail": "CONNECT 200; TLSv1.3 with the certificate verified for api.anthropic.com; GET /v1/models with no key answered 401"
+    },
+    {
+      "kind": "deny",
+      "target": "github.com:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "huggingface.co:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "pypi.org:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "peps.python.org:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "eips.ethereum.org:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "ercs.ethereum.org:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "host.docker.internal:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "deny",
+      "target": "gateway.docker.internal:443",
+      "ok": true,
+      "detail": "CONNECT answered 403"
+    },
+    {
+      "kind": "direct",
+      "target": "140.82.112.3:443",
+      "ok": true,
+      "detail": "no connection: [Errno 101] Network is unreachable"
+    },
+    {
+      "kind": "direct",
+      "target": "1.1.1.1:443",
+      "ok": true,
+      "detail": "no connection: [Errno 101] Network is unreachable"
+    },
+    {
+      "kind": "service",
+      "target": "embedder:8080",
+      "ok": true,
+      "detail": "accepts a TCP connection"
+    },
+    {
+      "kind": "service",
+      "target": "neo4j:7687",
+      "ok": true,
+      "detail": "accepts a TCP connection"
+    },
+    {
+      "kind": "dns",
+      "target": "api.anthropic.com",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "github.com",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "huggingface.co",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "pypi.org",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "peps.python.org",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "eips.ethereum.org",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "ercs.ethereum.org",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "host.docker.internal",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "gateway.docker.internal",
+      "ok": true,
+      "detail": "does not resolve: [Errno -3] Temporary failure in name resolution"
+    },
+    {
+      "kind": "dns",
+      "target": "embedder",
+      "ok": true,
+      "detail": "resolves to 172.22.0.1"
+    },
+    {
+      "kind": "dns",
+      "target": "neo4j",
+      "ok": true,
+      "detail": "resolves to 172.22.0.3"
+    },
+    {
+      "kind": "gateway",
+      "target": "default route",
+      "ok": true,
+      "detail": "none, IPv4 or IPv6"
+    },
+    {
+      "kind": "gateway",
+      "target": "172.22.0.1",
+      "ok": true,
+      "detail": "not probed: an address of the service embedder:8080"
+    },
+    {
+      "kind": "gateway",
+      "target": "192.168.65.1",
+      "ok": true,
+      "detail": "no TCP port from 1 to 65535 accepts (ENETUNREACH 65535)"
+    },
+    {
+      "kind": "gateway",
+      "target": "192.168.65.254",
+      "ok": true,
+      "detail": "no TCP port from 1 to 65535 accepts (ENETUNREACH 65535)"
+    },
+    {
+      "kind": "gateway",
+      "target": "172.17.0.1",
+      "ok": true,
+      "detail": "no TCP port from 1 to 65535 accepts (ENETUNREACH 65535)"
+    },
+    {
+      "kind": "mounts",
+      "target": "/proc/mounts",
+      "ok": true,
+      "detail": "only the container's own and the allowed mounts (/input, /output, /run/secrets/anthropic_api_key)"
+    }
+  ],
+  "ts": "2026-11-02T05:18:58Z",
+  "gateway_scan_seconds": 1.9
+}

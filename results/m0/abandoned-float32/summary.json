@@ -1,0 +1,52 @@
+{
+  "arm": "H+",
+  "stream": "m0-h-plus.jsonl",
+  "stream_sha256": "c188c3050d15449c441acc37bd24669d77e19148d9d46186d1a105a728fc8010",
+  "episodes": 1441,
+  "ok": 35,
+  "failed": 0,
+  "text_chars": 3651707,
+  "input_tokens": 1400907,
+  "output_tokens": 84864,
+  "calls": 353,
+  "api_errors": 0,
+  "api_errors_by_outcome": {
+    "ingested": 0,
+    "failed": 0,
+    "stopped": 0,
+    "unknown": 0
+  },
+  "calls_over_100k_input": 0,
+  "removal": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "calls": 0,
+    "api_errors": 0
+  },
+  "unattributed": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "calls": 0,
+    "api_errors": 0
+  },
+  "wall_s": 380.268,
+  "elapsed_s": 453.739,
+  "invocations": 2,
+  "exit": 2,
+  "graphiti_core": "0.31.2",
+  "model": "claude-haiku-5-5",
+  "images": {
+    "graphiti": [
+      "sha256:2f2fcc2a41de553c1fd71a07b524312c2086d56384f5b8f6076d2b8ebe43ea27"
+    ],
+    "egress": [
+      "sha256:af70a6785528fa03c22d75177fbcdcad71191d0c739d692c9de846e7b5577dc5"
+    ],
+    "embedder": [
+      "sha256:108701915df4261e19ea3315eb5192745ab4cea9740983b69662014945aaa4e1"
+    ],
+    "neo4j": [
+      "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+    ]
+  }
+}

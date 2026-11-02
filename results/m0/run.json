@@ -1,0 +1,112 @@
+{
+  "stream": "m0-h-plus.jsonl",
+  "stream_sha256": "c188c3050d15449c441acc37bd24669d77e19148d9d46186d1a105a728fc8010",
+  "arm": "H+",
+  "invocations": [
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T05:18:55Z",
+      "resume": false,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 4464.817,
+      "exit": 2,
+      "stop": {
+        "episode_id": "f6eb8d417eeb:PEP-3108",
+        "error": "openai APIConnectionError"
+      },
+      "crash": null
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T06:34:22Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 1952.882,
+      "exit": 2,
+      "stop": {
+        "episode_id": "21d9bf1202c1:PEP-446",
+        "error": "openai APIConnectionError"
+      },
+      "crash": null
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T07:07:57Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 2337.898,
+      "exit": 4,
+      "stop": null,
+      "crash": "CancelledError"
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T07:47:22Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 3316.914,
+      "exit": 2,
+      "stop": {
+        "episode_id": "4b7f1fcd4c0e:PEP-622",
+        "error": "neo4j ServiceUnavailable"
+      },
+      "crash": null
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T08:43:41Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 341.054,
+      "exit": 4,
+      "stop": null,
+      "crash": "CancelledError"
+    },
+    {
+      "command": "ingest",
+      "started_at": "2026-11-02T08:49:56Z",
+      "resume": true,
+      "skipped": [],
+      "images": {
+        "graphiti": "sha256:339b3f23770d9b767b6ea73b52addd4fc31175af9848c3c87662d5c298d416fc",
+        "egress": "sha256:54cd0411c5ca1e769d85a912b73b3d0f58e652811bbc3d1f127df049fc030db6",
+        "embedder": "sha256:ef77a8be8a9c1cadc78a1fa299f3186c9425b6604a075e04fc1de5aefbc70c7b",
+        "neo4j": "sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177"
+      },
+      "elapsed_s": 6022.862,
+      "exit": 0,
+      "stop": null,
+      "crash": null
+    }
+  ]
+}

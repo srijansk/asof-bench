@@ -1,0 +1,12 @@
+# M0 operational override from invocation 4 on: the embedding server's allocator settings only,
+# with no effect on any result (the model, its weights, its dtype and every vector are unchanged).
+# glibc gives each thread of the server its own arena and raises its mmap threshold after large
+# frees, so the freed activation buffers of large batches stay resident; the server grew to about
+# 1.5 GiB in 30-40 minutes and the Docker VM's OOM killer ended it twice. Two arenas and a fixed
+# 128 KiB mmap threshold return large buffers to the system when they are freed.
+services:
+  embedder:
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+      MALLOC_TRIM_THRESHOLD_: "131072"

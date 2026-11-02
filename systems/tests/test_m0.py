@@ -162,8 +162,10 @@ class World:
             "arm": "H+", "stream": "m0-h-plus.jsonl", "stream_sha256": input_sha256,
             "episodes": 4, "ok": 4, "failed": 0, "text_chars": 1000,
             "input_tokens": 10_000_000, "output_tokens": 2_000_000, "calls": 40,
-            "calls_over_100k_input": 0, "wall_s": 120.0, "elapsed_s": 70.0,
-            "graphiti_core": "0.31.2", "model": "claude-haiku-5-5"}), encoding="utf-8")
+            "api_errors": 0, "calls_over_100k_input": 0,
+            "removal": {"input_tokens": 0, "output_tokens": 0, "calls": 0, "api_errors": 0},
+            "wall_s": 120.0, "elapsed_s": 70.0, "exit": 0, "graphiti_core": "0.31.2",
+            "model": "claude-haiku-5-5"}), encoding="utf-8")
         self.prepare = tmp_path / "prepare.json"
         self.prepare.write_text(json.dumps({
             "proposals": 2, "episodes": 4, "text_chars": 1000,
@@ -346,3 +348,42 @@ def test_project_writes_no_text_field_no_proposal_text_and_no_local_path(tmp_pat
 
 def test_the_price_basis_parses_to_exact_prices():
     assert m0.parse_prices(BASIS) == (Fraction(1, 10), Fraction(1, 2))
+
+
+def test_project_refuses_a_run_that_did_not_reach_the_stream_s_end(tmp_path, capsys):
+    # The summary of a stopped run has the whole stream's characters but some episodes' tokens.
+    cases = [({"exit": 2}, "its last invocation exited with status 2"),
+             ({"exit": 3}, "its last invocation exited with status 3"),
+             ({"exit": None}, "its last invocation exited with status None"),
+             ({"ok": 2, "failed": 1}, "its log covers 3 of its 4 episodes")]
+    for index, (changes, message) in enumerate(cases):
+        world = World(tmp_path / str(index), SMALL, named=["PEP-1"])
+        world.edit(world.summary, **changes)
+        assert world.project() == 2
+        assert message in capsys.readouterr().err
+        assert not world.out.exists()
+    # A finished run with an episode logged as failed (exit status 1) is projected.
+    world = World(tmp_path / "failed", SMALL, named=["PEP-1"])
+    world.edit(world.summary, exit=1, ok=3, failed=1)
+    assert world.project() == 0
+
+
+def test_project_refuses_a_run_in_which_a_call_failed(tmp_path, capsys):
+    world = World(tmp_path, SMALL, named=["PEP-1"])
+    world.edit(world.summary, api_errors=2)
+    assert world.project() == 2
+    assert "some calls failed inside Graphiti, so the rates would be understated" in (
+        capsys.readouterr().err)
+    assert not world.out.exists()
+
+
+def test_the_rates_count_the_ingestion_attempts_and_not_the_removal_calls(tmp_path):
+    world = World(tmp_path, SMALL, named=["PEP-1", "PEP-2"])
+    world.edit(world.summary, removal={"input_tokens": 9_000_000, "output_tokens": 900_000,
+                                       "calls": 30, "api_errors": 0})
+    assert world.project() == 0
+    projection = world.projection()
+    assert (projection["rates"]["in_per_char"], projection["rates"]["out_per_char"]) == (
+        10_000, 2_000)
+    assert projection["pilot"]["removal"]["input_tokens"] == 9_000_000
+    assert projection["total"]["cost_usd"] == pytest.approx(240.0)

@@ -289,10 +289,60 @@ def test_the_usage_log_records_each_response_under_the_current_episode(environme
         "ba9876543210:EIP-2", None]
     assert set(lines[0]) == {"ts", "context", "model", "input_tokens", "output_tokens",
                              "cache_creation_input_tokens", "cache_read_input_tokens",
-                             "stop_reason"}
+                             "stop_reason", "error"}
     assert {key: lines[0][key] for key in USAGE} == USAGE
-    assert (lines[0]["model"], lines[0]["stop_reason"]) == (MODEL, "end_turn")
+    assert (lines[0]["model"], lines[0]["stop_reason"], lines[0]["error"]) == (
+        MODEL, "end_turn", None)
     assert len(recorder.requests) == 5
+
+
+def test_a_call_that_raises_is_recorded_with_its_class_only(environment, key_file, tmp_path):
+    pytest.importorskip("graphiti_core")
+    from graphiti import adapter
+    from graphiti_core.prompts.models import Message
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        value: str
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route", request=request)
+
+    path = tmp_path / "usage.jsonl"
+    client = usage.instrument(llm.make_async_client(
+        key_file, max_retries=0, transport=httpx.MockTransport(unreachable)),
+        usage.UsageLog(str(path)))
+    with pytest.raises(anthropic.APIConnectionError):
+        run(client, ask)
+    # Graphiti catches a 400 and asks again: the failed call stays visible beside the answer.
+    bad = {"type": "error", "error": {"type": "invalid_request_error",
+                                      "message": f"a toy refusal quoting {KEY}"}}
+    valid = message([{"type": "tool_use", "id": "toolu_01", "name": "Answer",
+                      "input": {"value": "toy"}}], "tool_use")
+    client = usage.instrument(llm.make_async_client(
+        key_file, max_retries=0, transport=httpx.MockTransport(Recorder((400, bad),
+                                                                        (200, valid)))),
+        usage.UsageLog(str(path)))
+    graphiti_llm = adapter.make_llm_client(client)
+
+    async def calls(_):
+        token = usage.usage_context.set("0123456789ab:PEP-1")
+        try:
+            return await graphiti_llm.generate_response(
+                [Message(role="system", content="Extract."), Message(role="user", content="T.")],
+                response_model=Answer)
+        finally:
+            usage.usage_context.reset(token)
+
+    assert run(client, calls) == {"value": "toy"}
+    text = path.read_text(encoding="utf-8")
+    lines = [json.loads(line) for line in text.splitlines()]
+    assert [(line["context"], line["error"]) for line in lines] == [
+        (None, "APIConnectionError"), ("0123456789ab:PEP-1", "BadRequestError"),
+        ("0123456789ab:PEP-1", None)]
+    assert all(line[count] == 0 for line in lines[:2] for count in USAGE)
+    assert (lines[1]["model"], lines[1]["stop_reason"]) == (MODEL, None)
+    assert KEY not in text and "toy refusal" not in text
 
 
 def test_the_usage_log_records_every_response_of_graphiti_s_own_retries(environment, key_file,
@@ -351,7 +401,8 @@ def test_the_key_is_in_no_usage_line_and_no_error(environment, key_file, tmp_pat
     for text in (str(error), repr(error), "".join(traceback.format_exception(error)),
                  path.read_text(encoding="utf-8")):
         assert KEY not in text
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [line["error"] for line in lines] == [None, "AuthenticationError"]
 
 
 def test_a_key_file_that_holds_no_key_is_refused_without_showing_it(tmp_path):

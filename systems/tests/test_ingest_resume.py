@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -78,23 +81,28 @@ class FakeEngine:
     """Stands in for Graphiti: records each add_episode's arguments, makes two model calls per
     attempt through the run's usage log (as the instrumented client does), and stores each
     episode it ingests. ``outcomes`` gives, for an episode, what each of its attempts does: an
-    exception to raise, "orphan" to store the episode and then raise, or None to succeed (the
-    default once the list is used up)."""
+    exception to raise, "orphan" to store the episode and then raise, "swallowed" to record a
+    call that raised and succeed all the same (as Graphiti does where it catches one), or None
+    to succeed (the default once the list is used up). With ``broken``, reading the store raises
+    an error that no rule expects."""
 
     def __init__(self, usage_log: usage.UsageLog, stored: list[dict],
-                 outcomes: dict[str, list]) -> None:
-        self.usage_log, self.stored = usage_log, stored
+                 outcomes: dict[str, list], broken: bool = False) -> None:
+        self.usage_log, self.stored, self.broken = usage_log, stored, broken
         self.outcomes = {name: list(plan) for name, plan in outcomes.items()}
         self.calls: list[dict] = []
+        self.removed: list[str] = []
         self.source, self.version, self.closed = "text", "0.31.2", False
+
+    def call(self, tokens: int) -> None:
+        self.usage_log.record(usage.usage_context.get(), "claude-haiku-5-5",
+                              {"input_tokens": tokens, "output_tokens": tokens // 10}, "tool_use")
 
     async def add_episode(self, **arguments) -> str:
         self.calls.append(arguments)
         for tokens in (1000, 2000):
             await asyncio.sleep(0)
-            self.usage_log.record(usage.usage_context.get(), "claude-haiku-5-5",
-                                  {"input_tokens": tokens, "output_tokens": tokens // 10},
-                                  "tool_use")
+            self.call(tokens)
         plan = self.outcomes.get(arguments["name"], [])
         outcome = plan.pop(0) if plan else None
         uuid = f"uuid-{arguments['name']}"
@@ -102,14 +110,24 @@ class FakeEngine:
             self.stored.append({"uuid": uuid, "name": arguments["name"],
                                 "group_id": arguments["group_id"]})
             raise RuntimeError("failed after writing")
-        if outcome is not None:
+        if outcome == "swallowed":
+            self.usage_log.record_error(usage.usage_context.get(), "claude-haiku-5-5",
+                                        "OverloadedError")
+        elif outcome is not None:
             raise outcome
         self.stored.append({"uuid": uuid, "name": arguments["name"],
                             "group_id": arguments["group_id"]})
         return uuid
 
     async def stored_episodes(self) -> list[dict]:
+        if self.broken:
+            raise KeyError("an error no rule expects")
         return list(self.stored)
+
+    async def remove_episode(self, uuid: str) -> None:
+        self.call(500)
+        self.removed.append(uuid)
+        self.stored[:] = [episode for episode in self.stored if episode["uuid"] != uuid]
 
     async def close(self) -> None:
         self.closed = True
@@ -127,18 +145,28 @@ class Harness:
         self.engines: list[FakeEngine] = []
         self.messages: list[str] = []
 
-    def run(self, resume: bool, outcomes: dict[str, list] | None = None,
-            arm: str | None = None) -> int:
+    def open_engine(self, outcomes: dict[str, list] | None = None, broken: bool = False):
         async def open_engine(usage_log, key_file):
             assert key_file == str(self.key_file)
-            engine = FakeEngine(usage_log, self.stored, outcomes or {})
+            engine = FakeEngine(usage_log, self.stored, outcomes or {}, broken)
             self.engines.append(engine)
             return engine
 
+        return open_engine
+
+    def run(self, resume: bool, outcomes: dict[str, list] | None = None,
+            arm: str | None = None, skip: list[str] = (), broken: bool = False) -> int:
         return asyncio.run(ingest.run(self.stream, arm or self.arm, self.out, resume=resume,
-                                      images=IMAGES, open_engine=open_engine, preflight=None,
-                                      key_file=str(self.key_file), delays=(0.0, 0.0),
-                                      progress=self.messages.append))
+                                      images=IMAGES, skip=skip,
+                                      open_engine=self.open_engine(outcomes, broken),
+                                      preflight=None, key_file=str(self.key_file),
+                                      delays=(0.0, 0.0), progress=self.messages.append))
+
+    def remove(self, uuids: list[str]) -> int:
+        return asyncio.run(ingest.remove_episodes(uuids, self.out, images=IMAGES,
+                                                  open_engine=self.open_engine(),
+                                                  preflight=None, key_file=str(self.key_file),
+                                                  progress=self.messages.append))
 
     def begun(self, log: list[dict], usage_lines: list[dict]) -> None:
         """The state an earlier invocation left: its run.json, log and usage lines."""
@@ -214,6 +242,9 @@ def test_resume_continues_after_the_logged_episodes_and_never_retries_a_failed_o
     assert record["invocations"][1]["exit"] == ingest.EXIT_FAILED
     assert (summary["graphiti_core"], summary["model"], summary["arm"]) == (
         "0.31.2", "claude-haiku-5-5", "H+")
+    assert (summary["exit"], summary["api_errors"]) == (ingest.EXIT_FAILED, 0)
+    assert summary["removal"] == summary["unattributed"] == {
+        "input_tokens": 0, "output_tokens": 0, "calls": 0, "api_errors": 0}
     assert summary["images"] == {name: [value] for name, value in IMAGES.items()}
     assert (summary["stream"], summary["stream_sha256"]) == (
         "toy.jsonl", hashlib.sha256(harness.stream.read_bytes()).hexdigest())
@@ -286,7 +317,11 @@ def test_an_infrastructure_error_stops_the_run_unlogged_and_a_resume_attempts_it
     assert [line["episode_id"] for line in harness.log()] == ids[:2]
     summary = harness.summary()
     assert (summary["ok"], summary["failed"], summary["calls"]) == (2, 0, 6)
-    assert harness.record()["invocations"][0]["exit"] == ingest.EXIT_STOPPED
+    assert summary["exit"] == ingest.EXIT_STOPPED
+    stopped = harness.record()["invocations"][0]
+    assert stopped["exit"] == ingest.EXIT_STOPPED
+    assert stopped["stop"] == {"episode_id": ids[2],
+                               "error": ingest.infrastructure_error(error)}
     assert any("stopped (exit 2)" in text for text in harness.messages)
     # Once the infrastructure is back, a resume continues from that episode.
     assert harness.run(resume=True) == ingest.EXIT_INGESTED
@@ -325,6 +360,8 @@ def test_five_consecutive_failures_in_a_group_stop_the_run(tmp_path):
     assert {call["name"] for call in harness.engines[0].calls} == set(ids[:6])
     assert harness.summary()["failed"] == 5
     assert any("5 consecutive pep episodes failed" in text for text in harness.messages)
+    assert harness.record()["invocations"][0]["stop"] == {"group": "pep",
+                                                          "error": "5 consecutive failures"}
     # A resume counts on from the log: the sixth failure in a row stops it again at once.
     assert harness.run(resume=True, outcomes={ids[6]: [ValueError("6")] * 3}) == 3
     assert [call["name"] for call in harness.engines[1].calls] == [ids[6]] * 3
@@ -512,20 +549,23 @@ def test_the_image_ids_are_parsed_and_checked():
 
 def record_of(elapsed: list[float | None]) -> dict:
     return {"arm": "CF", "stream": "cf.jsonl", "stream_sha256": "0" * 64,
-            "invocations": [{"images": IMAGES, "elapsed_s": value} for value in elapsed]}
+            "invocations": [{"images": IMAGES, "elapsed_s": value, "exit": 0}
+                            for value in elapsed]}
 
 
 def test_summary_counts_calls_over_100k_input_tokens_and_names_every_model():
     episodes = [episode(1, kind="create")]
+    a = episodes[0]["episode_id"]
     log = [log_line(episodes[0], True, "u1")]
-    lines = [usage_line("a", 100_000, 1), usage_line("a", 99_999, 1, created=1),
-             usage_line("a", 90_000, 1, read=10_001), usage_line(None, 5, 1)]
+    lines = [usage_line(a, 100_000, 1), usage_line(a, 99_999, 1, created=1),
+             usage_line(a, 90_000, 1, read=10_001), usage_line(a, 5, 1)]
+    # The invocation killed without an elapsed time counts as none.
     summary = ingest.summarize(episodes, log, lines, record_of([12.5, None, 3.0]),
                                graphiti_core="0.31.2")
     assert summary["calls_over_100k_input"] == 1
     assert (summary["calls"], summary["arm"], summary["model"]) == (4, "CF", "claude-haiku-5-5")
     assert (summary["elapsed_s"], summary["invocations"]) == (15.5, 3)
-    lines.append(usage_line("a", 1, 1, model="claude-sonnet-5-5"))
+    lines.append(usage_line(a, 1, 1, model="claude-sonnet-5-5"))
     summary = ingest.summarize(episodes, log, lines, record_of([1.0]), graphiti_core="0.31.2")
     assert summary["model"] == ["claude-haiku-5-5", "claude-sonnet-5-5"]
     assert ingest.summarize(episodes, [], [], record_of([1.0]),
@@ -551,3 +591,200 @@ def test_config_json_records_the_adapter_s_configuration_and_the_lock():
         if marker is None or "linux" in marker:
             pins[name] = version
     assert adapter.recorded_packages(config) == pins
+
+
+def test_a_second_invocation_stops_at_once_while_one_holds_the_lock(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    harness = Harness(tmp_path, episodes)
+    with ingest.hold_lock(harness.out, "ingest"):
+        holder = json.loads((harness.out / "run.lock").read_text(encoding="utf-8"))
+        assert set(holder) == {"token", "command", "host", "pid", "since"}
+        with pytest.raises(ingest.Refused, match="another invocation holds the lock"):
+            harness.run(resume=False)
+        with pytest.raises(ingest.Refused, match="another invocation holds the lock"):
+            harness.remove(["any-uuid"])
+        assert [path.name for path in harness.out.iterdir()] == ["run.lock"]
+    assert harness.engines == [] and list(harness.out.iterdir()) == []
+    # Once the lock is free, the run goes ahead, and leaves no lock behind.
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
+    assert not (harness.out / "run.lock").exists()
+
+
+def test_a_lock_that_a_killed_invocation_left_says_how_old_its_heartbeat_is(tmp_path):
+    episodes = [episode(1, kind="create")]
+    harness = Harness(tmp_path, episodes)
+    lock = harness.out / "run.lock"
+    lock.write_text(json.dumps({"token": "gone", "command": "ingest", "host": "c0ffee",
+                                "pid": 7, "since": "2026-11-01T00:00:00Z"}), encoding="utf-8")
+    hour_ago = lock.stat().st_mtime - 3600
+    os.utime(lock, (hour_ago, hour_ago))
+    with pytest.raises(ingest.Refused, match=r"heartbeat is 36\d\d s old.*remove run.lock"):
+        harness.run(resume=False)
+    lock.unlink()
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
+
+
+def test_a_lock_is_touched_while_held_and_removed_only_by_its_holder(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest, "LOCK_HEARTBEAT_S", 0.05)
+    lock = tmp_path / "run.lock"
+    with ingest.hold_lock(tmp_path, "ingest"):
+        os.utime(lock, (time.time() - 3600, time.time() - 3600))
+        time.sleep(0.5)
+        assert time.time() - lock.stat().st_mtime < 60
+    assert not lock.exists()
+    with ingest.hold_lock(tmp_path, "ingest"):
+        lock.write_text(json.dumps({"token": "someone else's"}), encoding="utf-8")
+    assert json.loads(lock.read_text(encoding="utf-8")) == {"token": "someone else's"}
+
+
+def test_a_sigterm_unwinds_the_invocation_records_it_and_frees_the_lock(tmp_path):
+    class Terminated(FakeEngine):
+        async def add_episode(self, **arguments):
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(5)
+
+    episodes = [episode(1, kind="create")]
+    harness = Harness(tmp_path, episodes)
+
+    async def open_engine(usage_log, key_file):
+        engine = Terminated(usage_log, harness.stored, {})
+        harness.engines.append(engine)
+        return engine
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ingest.run(harness.stream, "H+", harness.out, resume=False, images=IMAGES,
+                               open_engine=open_engine, preflight=None,
+                               key_file=str(harness.key_file), delays=(0.0, 0.0),
+                               progress=harness.messages.append))
+    (invocation,) = harness.record()["invocations"]
+    assert (invocation["exit"], invocation["crash"]) == (ingest.EXIT_CRASHED, "CancelledError")
+    assert harness.engines[0].closed and not (harness.out / "run.lock").exists()
+
+
+def test_a_crash_is_recorded_in_run_json_as_exit_4(tmp_path, monkeypatch, capsys):
+    episodes = [episode(1, kind="create")]
+    harness = Harness(tmp_path, episodes)
+    with pytest.raises(KeyError):
+        harness.run(resume=False, broken=True)
+    (crash,) = harness.record()["invocations"]
+    assert (crash["exit"], crash["crash"]) == (ingest.EXIT_CRASHED, "KeyError")
+    assert crash["elapsed_s"] is not None and harness.engines[0].closed
+
+    async def crashing(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    # Whatever escapes main beyond a refusal ends the process with exit status 4.
+    monkeypatch.setattr(ingest, "run", crashing)
+    monkeypatch.setenv("ASOFBENCH_IMAGE_IDS",
+                       ",".join(f"{name}={value}" for name, value in IMAGES.items()))
+    assert ingest.main(["--stream", str(harness.stream), "--arm", "H+", "--out",
+                        str(harness.out)]) == ingest.EXIT_CRASHED
+    assert "crashed (RuntimeError)" in capsys.readouterr().err
+
+
+def test_run_json_is_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    path = tmp_path / "run.json"
+    ingest.write_json(path, {"version": 1})
+    ingest.write_json(path, {"version": 2})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 2}
+    assert [entry.name for entry in tmp_path.iterdir()] == ["run.json"]
+
+    def interrupted(source, target):
+        raise OSError("interrupted before the rename")
+
+    monkeypatch.setattr(ingest.os, "replace", interrupted)
+    with pytest.raises(OSError):
+        ingest.write_json(path, {"version": 3})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 2}
+
+
+def test_the_operator_can_skip_an_episode_that_keeps_stopping_the_run(tmp_path):
+    episodes = [episode(n, kind="create" if n == 1 else "modify") for n in range(1, 6)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    stuck = {ids[1]: [ServiceUnavailable("each time")], ids[2]: [ServiceUnavailable("too")]}
+    assert harness.run(resume=False, outcomes=stuck) == ingest.EXIT_STOPPED
+    assert harness.run(resume=True, outcomes=stuck) == ingest.EXIT_STOPPED
+    # Only on a resume, and only the first episode of its group with no log line, then the next.
+    with pytest.raises(ingest.Refused, match="needs --resume"):
+        harness.run(resume=False, skip=[ids[1]])
+    with pytest.raises(ingest.Refused, match="not the first pep episode with no log line"):
+        harness.run(resume=True, skip=[ids[2]])
+    with pytest.raises(ingest.Refused, match="not the first pep episode with no log line"):
+        harness.run(resume=True, skip=[ids[2], ids[1]])
+    assert len(harness.record()["invocations"]) == 2
+    assert harness.run(resume=True, skip=[ids[1], ids[2]]) == ingest.EXIT_FAILED
+    skipped = harness.log()[1:3]
+    assert [(line["episode_id"], line["ok"], line["error"], line["attempts"], line["episode_uuid"])
+            for line in skipped] == [(ids[1], False, ingest.SKIPPED, 0, None),
+                                     (ids[2], False, ingest.SKIPPED, 0, None)]
+    assert harness.record()["invocations"][-1]["skipped"] == [ids[1], ids[2]]
+    resumed = harness.engines[-1].calls
+    assert [call["name"] for call in resumed] == ids[3:]
+    # The window after the skipped episodes holds only ingested ones.
+    assert resumed[0]["previous_episode_uuids"] == [f"uuid-{ids[0]}"]
+    assert harness.summary()["failed"] == 2
+
+
+def test_remove_episodes_refuses_what_it_must_and_records_its_invocation(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    with pytest.raises(ingest.Refused, match="holds no run"):
+        harness.remove(["any-uuid"])
+    assert harness.run(resume=False, outcomes={ids[1]: ["orphan"]}) == ingest.EXIT_STOPPED
+    ingested = harness.log()[0]["episode_uuid"]
+    with pytest.raises(ingest.Refused, match="records .* as ingested"):
+        harness.remove([ingested])
+    assert len(harness.record()["invocations"]) == 1
+    assert harness.remove([f"uuid-{ids[1]}"]) == ingest.EXIT_INGESTED
+    assert harness.engines[-1].removed == [f"uuid-{ids[1]}"] and harness.engines[-1].closed
+    invocation = harness.record()["invocations"][-1]
+    assert (invocation["command"], invocation["uuids"], invocation["removed"],
+            invocation["exit"], invocation["images"]) == (
+        "remove-episodes", [f"uuid-{ids[1]}"], [f"uuid-{ids[1]}"], 0, IMAGES)
+    assert invocation["elapsed_s"] is not None
+    assert harness.usage()[-1]["context"] == f"remove-episode:{ids[1]}"
+    assert harness.remove(["not-in-the-store"]) == ingest.EXIT_STOPPED
+    assert harness.record()["invocations"][-1]["exit"] == ingest.EXIT_STOPPED
+    # The resume attempts the episode again; the removal's calls are counted apart from the
+    # ingestion attempts', which every attempt's calls make up.
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    summary = harness.summary()
+    assert summary["removal"] == {"input_tokens": 500, "output_tokens": 50, "calls": 1,
+                                  "api_errors": 0}
+    assert (summary["input_tokens"], summary["calls"]) == (3 * 3000, 6)
+    assert summary["elapsed_s"] == pytest.approx(sum(
+        invocation["elapsed_s"] for invocation in harness.record()["invocations"]))
+
+
+def test_a_call_that_raised_inside_an_ingested_episode_is_counted(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={episodes[1]["episode_id"]: ["swallowed"]}) == 0
+    summary = harness.summary()
+    assert (summary["ok"], summary["api_errors"], summary["calls"]) == (2, 1, 4)
+    (failed,) = [line for line in harness.usage() if line["error"]]
+    assert failed["context"] == episodes[1]["episode_id"]
+    assert (failed["error"], failed["input_tokens"], failed["output_tokens"]) == (
+        "OverloadedError", 0, 0)
+
+
+def test_summary_counts_ingestion_attempts_apart_from_removal_and_unattributed_calls():
+    episodes = [episode(1, kind="create")]
+    eid = episodes[0]["episode_id"]
+    failed_call = {**usage_line(eid, 0, 0), "error": "BadRequestError"}
+    lines = [usage_line(eid, 100, 10), failed_call, usage_line(eid, 50, 5, created=5),
+             usage_line(f"remove-episode:{eid}", 1000, 100),
+             {**usage_line(f"remove-episode:{eid}", 0, 0), "error": "RateLimitError"},
+             usage_line(None, 7, 1)]
+    summary = ingest.summarize(episodes, [log_line(episodes[0], True, "u1")], lines,
+                               record_of([1.0]), graphiti_core="0.31.2")
+    assert {key: summary[key] for key in ("input_tokens", "output_tokens", "calls",
+                                          "api_errors")} == {
+        "input_tokens": 155, "output_tokens": 15, "calls": 2, "api_errors": 1}
+    assert summary["removal"] == {"input_tokens": 1000, "output_tokens": 100, "calls": 1,
+                                  "api_errors": 1}
+    assert summary["unattributed"] == {"input_tokens": 7, "output_tokens": 1, "calls": 1,
+                                       "api_errors": 0}
+    assert summary["exit"] == 0

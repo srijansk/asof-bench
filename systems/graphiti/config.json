@@ -92,7 +92,11 @@
     "retries": "Graphiti's own retries and the SDK's apply first; an episode that still raises is attempted twice more in place, after 30 s and then 120 s, with the same previous episodes and saga predecessor, and one that still raises is logged with ok false and never attempted again, by the run or a resumed one",
     "infrastructure": "an infrastructure error stops the run with exit status 2 and leaves the episode unlogged, so that a resumed run attempts it again: Neo4j unavailable or a session lost (ServiceUnavailable, SessionExpired, SessionError, DatabaseUnavailable); the embedder unreachable or failing (openai APIConnectionError, InternalServerError); after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, OverloadedError, InternalServerError, AuthenticationError, PermissionDeniedError, and Graphiti's RateLimitError); so does a failed attempt that left the episode in the store",
     "consecutive_failures": "5 logged failures in a row in a group stop the run with exit status 3",
-    "resume": "ingest --resume continues each group from its first episode with no log line, on the stream and arm the run began with"
+    "resume": "ingest --resume continues each group from its first episode with no log line, on the stream and arm the run began with",
+    "skip": "ingest --resume --skip-episode <episode_id> logs the first episode of its group with no log line as failed (skipped by the operator after repeated infrastructure stops), records it in run.json and goes on",
+    "lock": "every invocation, the removal of episodes included, holds the output directory's lock: it creates run.lock with O_EXCL (flock and lockf do not exclude across containers on Docker Desktop's bind mounts), touches it every 30 s and removes it at its end; a second one stops at once with exit status 2; a SIGTERM cancels the invocation, which records itself and releases the lock; one killed outright leaves the lock, for the operator to remove once it is gone",
+    "crash": "an exception that no rule expects ends the invocation with exit status 4, which run.json records with the exception's class",
+    "calls_that_raise": "every call that raises after the SDK's retries is a usage line with no tokens and its exception's class, counted as api_errors, so that a failure Graphiti catches and carries on from stays visible"
   },
   "concurrency": {
     "semaphore_limit": 20,

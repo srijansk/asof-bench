@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import tempfile
 import time
@@ -112,7 +113,7 @@ def make_no_reranker():
 class GraphitiEngine:
     """Graphiti as configured, with what ingest.py needs of it: ``add_episode``, which passes its
     arguments to ``Graphiti.add_episode`` unchanged and returns the new episode's uuid, the
-    episodes in the store, and ``close``."""
+    episodes in the store, ``remove_episode`` and ``close``."""
 
     def __init__(self, graphiti, source, version: str) -> None:
         self.graphiti, self.source, self.version = graphiti, source, version
@@ -125,6 +126,10 @@ class GraphitiEngine:
         """Every Episodic node in the store, as ``{"uuid", "name", "group_id"}``."""
         result = await self.graphiti.driver.execute_query(EPISODIC_QUERY)
         return [record.data() for record in result.records]
+
+    async def remove_episode(self, uuid: str) -> None:
+        """Graphiti's own remove_episode."""
+        await self.graphiti.remove_episode(uuid)
 
     async def close(self) -> None:
         await self.graphiti.close()
@@ -237,48 +242,9 @@ def check_installation(config_path: Path = CONFIG) -> dict[str, str]:
     return installed
 
 
-def ingested_uuids(out_dir: Path) -> set[str]:
-    """The uuids of the episodes that the run's ingest log records as ingested."""
-    path = out_dir / "ingest-log.jsonl"
-    if not path.exists():
-        return set()
-    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    return {line["episode_uuid"] for line in lines if line.get("ok")}
-
-
-async def remove_episodes(uuids: list[str], out_dir: Path, key_file: str = llm.KEY_FILE,
-                          progress=print) -> int:
-    """Removes, with Graphiti's own remove_episode, each episode of ``uuids`` that the store
-    holds and the run's ingest log does not record as ingested: what an attempt wrote before it
-    stopped. remove_episode rebuilds the summaries of the entities the episode mentioned with
-    the construction model, so its calls are recorded in the run's usage log, under
-    ``remove-episode:<episode id>``. Returns the exit status: 0 when every uuid is removed."""
-    if refused := sorted(set(uuids) & ingested_uuids(out_dir)):
-        progress(f"remove-episodes: the log records {', '.join(refused)} as ingested; only an "
-                 "episode it does not record is removed")
-        return 2
-    engine = await open_engine(usage.UsageLog(str(out_dir / "usage.jsonl")), key_file)
-    status = 0
-    try:
-        stored = {episode["uuid"]: episode for episode in await engine.stored_episodes()}
-        for uuid in uuids:
-            if uuid not in stored:
-                progress(f"remove-episodes: the store holds no episode {uuid}")
-                status = 2
-                continue
-            token = usage.usage_context.set(f"remove-episode:{stored[uuid]['name']}")
-            try:
-                await engine.graphiti.remove_episode(uuid)
-            finally:
-                usage.usage_context.reset(token)
-            progress(f"remove-episodes: removed {uuid} ({stored[uuid]['name']})")
-    finally:
-        await engine.close()
-    return status
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Graphiti as asof-bench configures it.")
+    parser = argparse.ArgumentParser(description="Graphiti as asof-bench configures it.",
+                                     allow_abbrev=False)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true",
                       help="check the installation against config.json, with no network")
@@ -290,7 +256,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.remove_episodes:
         if args.out is None:
             parser.error("--remove-episodes needs --out, the run's output directory")
-        return asyncio.run(remove_episodes(args.remove_episodes, args.out))
+        # ingest.py holds the run's state: its lock, its run.json and its network check.
+        from graphiti import ingest
+
+        try:
+            images = ingest.parse_image_ids(os.environ.get("ASOFBENCH_IMAGE_IDS"))
+            return asyncio.run(ingest.remove_episodes(args.remove_episodes, args.out,
+                                                      images=images))
+        except ingest.Refused as refusal:
+            print(f"remove-episodes: {refusal}", file=sys.stderr)
+            return ingest.EXIT_STOPPED
+        except SystemExit:
+            raise
+        except BaseException as error:  # noqa: BLE001 - a crash: recorded in run.json, exit 4
+            return ingest.crashed(error, llm.KEY_FILE, "remove-episodes")
     try:
         installed = check_installation()
     except RuntimeError as error:

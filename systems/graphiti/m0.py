@@ -15,13 +15,15 @@ episodes hold proposal text, so ``<dir>`` must be outside the checkout.
         --prepare <dir>/prepare.json --manifest data/v0.1/MANIFEST.json \\
         --questions data/v0.1/questions.jsonl --streams-dir streams --out projection.json
 
-checks that the summary is the run of claude-haiku-5-5 over the prepared input (its stream's
-SHA-256 is prepare.json's ``input_sha256``) and that prepare.json, questions.jsonl and the three
-local streams are the registered ones, then applies section 13's projection and writes it, step
-by step, to ``projection.json``:
+checks that the summary is the finished run of claude-haiku-5-5 over the prepared input (its
+stream's SHA-256 is prepare.json's ``input_sha256``; its last invocation exited with status 0 or
+1 and its log covers every episode; no call raised) and that prepare.json, questions.jsonl and
+the three local streams are the registered ones, then applies section 13's projection and writes
+it, step by step, to ``projection.json``:
 
 1. the rates, ``in_per_char = input_tokens / text_chars`` and ``out_per_char = output_tokens /
-   text_chars``, with the tokens from the run's summary.json (its input tokens include the
+   text_chars``, with the tokens of the run's ingestion attempts from its summary.json (every
+   attempt counted, the calls that removed episodes not; input tokens include the
    cache-creation and cache-read tokens) and the characters from prepare.json;
 2. the ingestions that Graphiti's entries need, the H+, H- and CF streams and section 14's
    incremental path, whose characters are the H+ stream's again, each with its stream's
@@ -67,6 +69,8 @@ MILLION = 1_000_000
 CHUNK = 1 << 20
 NO_K = ("the named proposals alone are projected beyond the budget, so no k fits; the "
         "registration does not provide for this case")
+# The exit statuses of an ingestion that reached the stream's end (graphiti/ingest.py).
+FINISHED = (0, 1)
 
 
 class Refused(Exception):
@@ -242,6 +246,19 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
         raise Refused(f"{name_of(summary_path)} counts {summary.get('episodes')} episodes and "
                       f"{summary.get('text_chars')} characters, {name_of(prepare_path)} "
                       f"{prepared.get('episodes')} and {prepared.get('text_chars')}")
+    # A run that stopped before the stream's end has the whole stream's characters but only
+    # some episodes' tokens, which would understate the rates.
+    if summary.get("exit") not in FINISHED:
+        raise Refused(f"{name_of(summary_path)} is not a finished run: its last invocation "
+                      f"exited with status {summary.get('exit')!r}, not 0 or 1; resume it first")
+    logged = (summary.get("ok") or 0) + (summary.get("failed") or 0)
+    if logged != summary.get("episodes"):
+        raise Refused(f"{name_of(summary_path)} is not a finished run: its log covers {logged} "
+                      f"of its {summary.get('episodes')} episodes")
+    if summary.get("api_errors") != 0:
+        raise Refused(f"{name_of(summary_path)} records {summary.get('api_errors')!r} calls that "
+                      "raised: some calls failed inside Graphiti, so the rates would be "
+                      "understated")
     text_chars = prepared["text_chars"]
     if not isinstance(text_chars, int) or text_chars <= 0:
         raise Refused(f"{name_of(prepare_path)} counts no characters")
@@ -270,13 +287,15 @@ def project(summary_path: Path, prepare_path: Path, manifest_path: Path, questio
         "inputs": hashes,
         "pilot": {key: summary.get(key) for key in ("episodes", "ok", "failed", "text_chars",
                                                     "input_tokens", "output_tokens", "calls",
-                                                    "calls_over_100k_input", "wall_s",
-                                                    "elapsed_s", "graphiti_core", "model",
-                                                    "images")},
+                                                    "api_errors", "calls_over_100k_input",
+                                                    "removal", "wall_s", "elapsed_s", "exit",
+                                                    "graphiti_core", "model", "images")},
         "rates": {"in_per_char": float(rates[0]), "out_per_char": float(rates[1]),
-                  "rule": "input_tokens / text_chars and output_tokens / text_chars: the run's "
-                          "summary.json tokens (input tokens with the cache-creation and "
-                          "cache-read tokens) over prepare.json's characters"},
+                  "rule": "input_tokens / text_chars and output_tokens / text_chars: the tokens "
+                          "of the run's ingestion attempts, every attempt counted and the calls "
+                          "that removed episodes not (summary.json; input tokens with the "
+                          "cache-creation and cache-read tokens), over prepare.json's "
+                          "characters"},
         "price_basis": basis,
         "prices_usd_per_million_tokens": {"input": float(prices[0]), "output": float(prices[1])},
         "ingestions": rows,

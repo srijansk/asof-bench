@@ -90,6 +90,15 @@ def test_the_shared_table_holds_the_api_and_the_connection_errors_and_nothing_el
         "builtins": {"ConnectionError"}}
 
 
+def test_a_table_built_on_the_shared_one_cannot_change_what_the_shared_one_holds():
+    own = {**run.INFRASTRUCTURE, "mine": frozenset({"Boom"})}
+    assert all(isinstance(classes, frozenset) for classes in run.INFRASTRUCTURE.values())
+    with pytest.raises(AttributeError):
+        own["anthropic"].add("Boom")
+    assert "Boom" not in run.INFRASTRUCTURE["anthropic"]
+    assert run.infrastructure_error(failure("mine.errors", "Boom")(), own) == "mine Boom"
+
+
 def test_the_table_that_the_caller_gives_decides_which_errors_stop_the_run():
     mine = {"mine": {"Boom"}}
     assert run.infrastructure_error(failure("mine.errors", "Boom")(), mine) == "mine Boom"
@@ -151,6 +160,19 @@ def test_a_second_invocation_is_refused_while_one_holds_the_lock(tmp_path):
         # The refused invocation leaves the holder's lock as it was.
         assert json.loads((tmp_path / "run.lock").read_text(encoding="utf-8")) == holder
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_refusal_points_at_the_readme_that_the_caller_gives(tmp_path):
+    with run.hold_lock(tmp_path, "answer"):
+        # With none given, it is the README.md that Graphiti's refusals have always named.
+        for arguments, readme in (({}, "README.md"),
+                                  ({"readme": "systems/reader/README.md"},
+                                   "systems/reader/README.md")):
+            with pytest.raises(run.Refused) as caught:
+                with run.hold_lock(tmp_path, "answer", **arguments):
+                    pytest.fail("a second invocation took the lock")
+            assert str(caught.value).endswith(f"gone ({readme} says how to check), remove "
+                                              "run.lock and run again")
 
 
 def test_the_lock_is_released_when_the_invocation_raises(tmp_path):
@@ -450,7 +472,9 @@ def test_the_first_reason_to_stop_the_run_is_the_one_kept():
 
 
 def test_the_exit_statuses_and_the_names_of_the_files_every_run_shares():
-    assert (run.EXIT_INGESTED, run.EXIT_FAILED, run.EXIT_STOPPED, run.EXIT_FAILURES,
+    assert (run.EXIT_DONE, run.EXIT_FAILED, run.EXIT_STOPPED, run.EXIT_FAILURES,
             run.EXIT_CRASHED) == (0, 1, 2, 3, 4)
+    # The status 0 is every runner's: EXIT_INGESTED is Graphiti's name for it, in ingest.py.
+    assert not hasattr(run, "EXIT_INGESTED")
     assert (run.NETCHECK, run.RUN, run.LOCK) == ("netcheck.json", "run.json", "run.lock")
     assert run.LOCK_HEARTBEAT_S == 30.0

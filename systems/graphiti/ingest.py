@@ -73,7 +73,7 @@ classification of infrastructure errors, the stop and the exit statuses) is in
 ``asofbench_systems.run``. This module gives it Graphiti's own values (``INFRASTRUCTURE``,
 ``IMAGE_NAMES``, ``SERVICES``, ``NETCHECK_ARGS``, ``MOUNTS`` and the waits) and re-exports its
 names, so that ``infrastructure_error``, ``parse_image_ids`` and ``netcheck_preflight`` here are
-the shared functions with those values given.
+the shared functions with those values given, and ``EXIT_INGESTED`` is its ``EXIT_DONE``.
 
 The state, log and summary functions use only the standard library; graphiti-core and anthropic
 are imported only by adapter.open_engine.
@@ -99,9 +99,9 @@ from asofbench_systems import llm, usage
 from asofbench_systems import run as plumbing
 from asofbench_systems.run import (
     EXIT_CRASHED,
+    EXIT_DONE,
     EXIT_FAILED,
     EXIT_FAILURES,
-    EXIT_INGESTED,
     EXIT_STOPPED,
     NETCHECK,
     RUN,
@@ -119,6 +119,9 @@ from asofbench_systems.run import (
 from asofbench_systems.stream import read_episodes
 from graphiti import adapter
 
+# Graphiti's name for the exit status 0 that every runner shares (asofbench_systems.run): every
+# episode of the stream is ingested.
+EXIT_INGESTED = EXIT_DONE
 ARMS = ("H+", "H-", "CF")
 LOG, USAGE, SUMMARY = "ingest-log.jsonl", "usage.jsonl", "summary.json"
 LOG_FIELDS = ("episode_id", "proposal", "group_id", "episode_uuid", "ok", "error", "started_at",
@@ -148,9 +151,10 @@ PRICED_INPUT_TOKENS = 100_000
 # theirs only after their own retries.
 INFRASTRUCTURE = {
     **plumbing.INFRASTRUCTURE,
-    "neo4j": {"ServiceUnavailable", "SessionExpired", "SessionError", "DatabaseUnavailable"},
-    "openai": {"APIConnectionError", "InternalServerError"},
-    "graphiti_core": {"RateLimitError"},
+    "neo4j": frozenset({"ServiceUnavailable", "SessionExpired", "SessionError",
+                        "DatabaseUnavailable"}),
+    "openai": frozenset({"APIConnectionError", "InternalServerError"}),
+    "graphiti_core": frozenset({"RateLimitError"}),
 }
 # The images a run records, as the launcher gives them in ASOFBENCH_IMAGE_IDS.
 IMAGE_NAMES = ("graphiti", "egress", "embedder", "neo4j")

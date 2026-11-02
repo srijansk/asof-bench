@@ -25,16 +25,17 @@ own fields, ``images`` (the image IDs it ran with), ``elapsed_s``, ``exit``, ``s
 stopped it, as ``Stop`` holds it) and ``crash`` (the class of the exception that crashed it),
 the last four null until they are known.
 
-Exit status, the same for every runner that shares this module: EXIT_INGESTED, 0, when every
-unit of work is done; EXIT_FAILED, 1, when the run reached the end of its work with a unit logged
-as failed; EXIT_STOPPED, 2, when the run is refused before it starts (``Refused``), the network
+Exit status, the same for every runner that shares this module: EXIT_DONE, 0, when the run did
+all its work; EXIT_FAILED, 1, when the run reached the end of its work with a unit logged as
+failed; EXIT_STOPPED, 2, when the run is refused before it starts (``Refused``), the network
 check fails or an infrastructure error stops it (a resume goes on after a stop); EXIT_FAILURES,
 3, when consecutive failures stop it; and EXIT_CRASHED, 4, when it crashes, which run.json
-records with the exception's class.
+records with the exception's class. A system may name the status 0 for what its work is, as
+Graphiti's ingestion does.
 
 Nothing here belongs to one system: a system gives the table of its infrastructure errors, the
-names of its images, its services, mounts and network-check arguments, the waits and the pointer
-to its README as arguments. It uses only the standard library.
+names of its images, its services, mounts and network-check arguments, the waits and the README
+that its refusals point at as arguments. It uses only the standard library.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ from pathlib import Path
 # The files of an output directory that every system's run names the same way: the network
 # check's report, the record of the run's invocations, and the lock.
 NETCHECK, RUN, LOCK = "netcheck.json", "run.json", "run.lock"
-EXIT_INGESTED, EXIT_FAILED, EXIT_STOPPED, EXIT_FAILURES, EXIT_CRASHED = 0, 1, 2, 3, 4
+EXIT_DONE, EXIT_FAILED, EXIT_STOPPED, EXIT_FAILURES, EXIT_CRASHED = 0, 1, 2, 3, 4
 # Seconds between the touches that show a held lock's invocation is alive.
 LOCK_HEARTBEAT_S = 30.0
 # An image ID, as Docker reports it.
@@ -67,11 +68,14 @@ IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 # them and their class name, matched along each class's MRO and through an exception's causes
 # (``infrastructure_error``): the part that every system shares, the API after the SDK's own
 # retries, unreachable, rate-limited, overloaded or failing, or refusing the key, and the
-# standard library's connection errors. A system adds the packages of the services it runs.
+# standard library's connection errors. A system adds the packages of the services it runs, in a
+# table of its own that starts from a copy of this one; the classes are frozensets, so that no
+# system can change what another's table holds.
 INFRASTRUCTURE = {
-    "anthropic": {"APIConnectionError", "RateLimitError", "OverloadedError", "InternalServerError",
-                  "AuthenticationError", "PermissionDeniedError"},
-    "builtins": {"ConnectionError"},
+    "anthropic": frozenset({"APIConnectionError", "RateLimitError", "OverloadedError",
+                            "InternalServerError", "AuthenticationError",
+                            "PermissionDeniedError"}),
+    "builtins": frozenset({"ConnectionError"}),
 }
 
 
@@ -151,12 +155,14 @@ def held_by(path: Path) -> str:
 
 
 @contextlib.contextmanager
-def hold_lock(out_dir: Path, command: str) -> Iterator[None]:
+def hold_lock(out_dir: Path, command: str, *, readme: str = "README.md") -> Iterator[None]:
     """Holds the output directory's lock for the invocation ``command``: the invocation creates
     run.lock with O_CREAT|O_EXCL, which excludes across the containers that share a bind mount
     (flock and lockf do not, on Docker Desktop's), touches it every LOCK_HEARTBEAT_S while it
     runs, and removes it at its end if it is still its own. Refused at once when the file
-    exists: another invocation holds it, or a killed one left it, whose heartbeat has stopped."""
+    exists: another invocation holds it, or a killed one left it, whose heartbeat has stopped.
+    The refusal says that ``readme``, the system's README, tells how to check that a killed
+    invocation is gone."""
     path = out_dir / LOCK
     token = uuid.uuid4().hex
     # The lock is the file's existence, not flock(2) or lockf(3). Two containers that shared one
@@ -164,7 +170,7 @@ def hold_lock(out_dir: Path, command: str) -> Iterator[None]:
     # lockf, on the same file there, so neither excludes the other invocation; an O_EXCL create
     # of a file that exists fails with EEXIST in the second container, so it does. The cost is
     # that an invocation killed outright leaves the file, which its stopped heartbeat shows and
-    # the operator removes (README.md).
+    # the operator removes (the system's README says how).
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
@@ -172,7 +178,7 @@ def hold_lock(out_dir: Path, command: str) -> Iterator[None]:
                       f"{held_by(path)}): one invocation at a time. A killed invocation leaves "
                       f"its lock, whose heartbeat stops (a live one touches it every "
                       f"{LOCK_HEARTBEAT_S:g} s): once you are sure that its invocation is gone "
-                      f"(README.md says how to check), remove {LOCK} and run again") from None
+                      f"({readme} says how to check), remove {LOCK} and run again") from None
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(json.dumps({"token": token, "command": command,
                                  "host": socket.gethostname(), "pid": os.getpid(),
@@ -205,7 +211,7 @@ def cancelled_on_sigterm() -> Iterator[None]:
     4 in run.json, closes what it opened and releases its lock. The handler runs on the event
     loop, so while the wait for the services or the network check blocks the loop it cannot run;
     Docker's SIGKILL, 10 s after the SIGTERM, then ends the invocation outright, which leaves its
-    lock and a null exit in run.json (README.md says how to recover)."""
+    lock and a null exit in run.json (the system's README says how to recover)."""
     loop, task = asyncio.get_running_loop(), asyncio.current_task()
     try:
         loop.add_signal_handler(signal.SIGTERM, task.cancel)

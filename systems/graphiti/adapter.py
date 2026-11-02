@@ -260,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.remove_episodes:
         if args.out is None:
             parser.error("--remove-episodes needs --out, the run's output directory")
-        # ingest.py holds the run's state: its lock, its run.json and its network check.
+        # ingest.py drives the run's state: its lock, its run.json and its network check.
         from graphiti import ingest
 
         try:

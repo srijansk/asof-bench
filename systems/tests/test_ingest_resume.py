@@ -2,13 +2,12 @@
 in-place retries, the infrastructure stop and the stop after consecutive failures, what a resumed
 run attempts, the previous-episode window and saga predecessor each episode is given, the ingest
 log and run.json, and the totals of summary.json. It also checks that config.json agrees with the
-adapter and with the image's lock, that the Dockerfile copies the shared files the adapter imports,
-and that what moved to the shared module (asofbench_systems.run, tested in test_run.py) is given
-Graphiti's own values. Standard library only: neither graphiti-core nor anthropic is imported."""
+adapter and with the image's lock. How the loop's plumbing is given Graphiti's own values, and
+what the Dockerfile copies, is in test_graphiti_wiring.py. Standard library only: neither
+graphiti-core nor anthropic is imported."""
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 import inspect
@@ -16,12 +15,10 @@ import json
 import os
 import re
 import signal
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-from asofbench_systems import llm, run, usage
+from asofbench_systems import llm, usage
 from graphiti import adapter, ingest
 
 KEY = "sk-ant-api00-made-up-for-tests-0123456789"
@@ -572,78 +569,6 @@ def test_resume_drops_an_unfinished_last_line(tmp_path):
     assert harness.summary()["calls"] == 1 + 2
 
 
-def test_ingest_offers_the_shared_names_it_moved_and_does_not_copy_them():
-    for name in ("Refused", "Stop", "hold_lock", "cancelled_on_sigterm", "recorded", "write_json",
-                 "read_jsonl", "drop_unfinished_line", "utc_now", "new_invocation", "NETCHECK",
-                 "RUN", "EXIT_INGESTED", "EXIT_FAILED", "EXIT_STOPPED", "EXIT_FAILURES",
-                 "EXIT_CRASHED"):
-        assert getattr(ingest, name) is getattr(run, name), name
-
-
-def test_graphiti_stops_on_the_infrastructure_errors_that_it_stopped_on_before_they_moved():
-    # The table as ingest.py held it before its Anthropic and connection entries moved to the
-    # shared module.
-    before = {
-        "neo4j": {"ServiceUnavailable", "SessionExpired", "SessionError", "DatabaseUnavailable"},
-        "openai": {"APIConnectionError", "InternalServerError"},
-        "anthropic": {"APIConnectionError", "RateLimitError", "OverloadedError",
-                      "InternalServerError", "AuthenticationError", "PermissionDeniedError"},
-        "graphiti_core": {"RateLimitError"},
-        "builtins": {"ConnectionError"},
-    }
-    assert ingest.INFRASTRUCTURE == before
-    # It is the shared table and Graphiti's own entries, for the services that it runs.
-    assert {package: ingest.INFRASTRUCTURE[package] for package in run.INFRASTRUCTURE} == (
-        run.INFRASTRUCTURE)
-    assert set(ingest.INFRASTRUCTURE) - set(run.INFRASTRUCTURE) == {"neo4j", "openai",
-                                                                    "graphiti_core"}
-    for package, classes in before.items():
-        for name in classes:
-            error = failure(f"{package}._exceptions", name)()
-            assert ingest.infrastructure_error(error) == f"{package} {name}"
-    assert ingest.infrastructure_error(ValueError("bad output")) is None
-    assert ingest.infrastructure_error(BadRequest("prompt is too long")) is None
-
-
-def test_the_image_ids_are_graphiti_s_four_and_a_refusal_points_at_its_readme():
-    assert list(IMAGES) == ["graphiti", "egress", "embedder", "neo4j"]
-    text = ",".join(f"{name}={value}" for name, value in IMAGES.items())
-    assert ingest.parse_image_ids(text) == IMAGES
-    for bad in (None, text.replace("egress=", "proxy=")):
-        with pytest.raises(ingest.Refused) as caught:
-            ingest.parse_image_ids(bad)
-        assert str(caught.value) == (
-            "ASOFBENCH_IMAGE_IDS must give the ID (sha256:...) of each image the run uses, as "
-            "name=ID entries for graphiti, egress, embedder, neo4j (systems/graphiti/README.md)")
-
-
-def test_graphiti_s_network_check_gets_its_services_mounts_and_waits(tmp_path, monkeypatch):
-    waits, commands = [], []
-    monkeypatch.setattr(run, "wait_for_services", lambda *arguments: waits.append(arguments))
-
-    def fake_run(command, check):
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 7)
-
-    monkeypatch.setattr(run.subprocess, "run", fake_run)
-    assert ingest.netcheck_preflight(tmp_path) == 7
-    # The services are waited for in the order that SERVICES gives, within 600 s, every 2 s.
-    assert waits == [((("neo4j", 7687), ("embedder", 8080)), 600.0, 2.0)]
-    # The command as it was when the services and the mounts were part of NETCHECK_ARGS, so that
-    # netcheck.json lists its checks as it always did.
-    script = GRAPHITI.parent / "env" / "netcheck.py"
-    assert script.is_file()
-    assert commands == [[
-        sys.executable, str(script), "--proxy", "http://egress:3128",
-        "--allow", "api.anthropic.com:443",
-        "--deny", "github.com:443,huggingface.co:443,pypi.org:443,peps.python.org:443,"
-                  "eips.ethereum.org:443,ercs.ethereum.org:443",
-        "--deny", "host.docker.internal:443,gateway.docker.internal:443",
-        "--direct", "140.82.112.3:443,1.1.1.1:443",
-        "--services", "embedder:8080,neo4j:7687",
-        "--mounts", "/input,/output,/run/secrets", "--report", str(tmp_path / "netcheck.json")]]
-
-
 def record_of(elapsed: list[float | None]) -> dict:
     return {"arm": "CF", "stream": "cf.jsonl", "stream_sha256": "0" * 64,
             "invocations": [{"images": IMAGES, "elapsed_s": value, "exit": 0}
@@ -711,37 +636,6 @@ def test_the_environment_s_proxy_outlasts_the_client_s_request_timeout():
     assert float(value) >= config["llm"]["timeout_s"] + 60
 
 
-def test_the_image_copies_the_shared_files_that_graphiti_imports_and_no_others():
-    """The Dockerfile copies the shared package's files one by one, and the build's self-test
-    imports the adapter only, which imports neither ingest.py nor the shared run.py: a file that
-    ingest.py needs and the Dockerfile lacks would fail only when the container first ran
-    ingest, and the tests that run inside the image read the files they are given, not the
-    image's own."""
-    package = GRAPHITI.parent / "common" / "asofbench_systems"
-
-    def imported(path: Path) -> set[str]:
-        """The files of the shared package that the file at ``path`` imports."""
-        files = set()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ImportFrom) and node.module == "asofbench_systems":
-                files |= {f"{alias.name}.py" for alias in node.names}
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-                    "asofbench_systems."):
-                files.add(f"{node.module.split('.')[1]}.py")
-            elif isinstance(node, ast.Import):
-                files |= {f"{alias.name.split('.')[1]}.py" for alias in node.names
-                          if alias.name.startswith("asofbench_systems.")}
-        return files
-
-    needed, pending = {"__init__.py"}, [GRAPHITI / "adapter.py", GRAPHITI / "ingest.py"]
-    while pending:
-        for name in imported(pending.pop()) - needed:
-            needed.add(name)
-            pending.append(package / name)
-    dockerfile = (GRAPHITI / "Dockerfile").read_text(encoding="utf-8")
-    assert set(re.findall(r"common/asofbench_systems/(\w+\.py)", dockerfile)) == needed
-
-
 def test_a_second_invocation_stops_at_once_while_one_holds_the_lock(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     harness = Harness(tmp_path, episodes)
@@ -771,6 +665,17 @@ def test_a_lock_that_a_killed_invocation_left_says_how_old_its_heartbeat_is(tmp_
         harness.run(resume=False)
     lock.unlink()
     assert harness.run(resume=False) == ingest.EXIT_INGESTED
+
+
+def test_both_commands_refuse_a_held_lock_with_the_readme_md_pointer_they_always_gave(tmp_path):
+    harness = Harness(tmp_path, [episode(1, kind="create")])
+    with ingest.hold_lock(harness.out, "ingest"):
+        for attempt in (lambda: harness.run(resume=False), lambda: harness.remove(["any-uuid"])):
+            with pytest.raises(ingest.Refused) as caught:
+                attempt()
+            assert str(caught.value).endswith("once you are sure that its invocation is gone "
+                                              "(README.md says how to check), remove run.lock "
+                                              "and run again")
 
 
 def test_a_sigterm_unwinds_the_invocation_records_it_and_frees_the_lock(tmp_path):

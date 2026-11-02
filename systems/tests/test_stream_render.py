@@ -99,6 +99,28 @@ def test_read_episodes_yields_the_json_lines_in_file_order(tmp_path):
     assert list(stream.read_episodes(str(path))) == episodes
 
 
+def test_episodes_of_reads_the_lines_that_it_is_given_and_names_the_stream_in_a_refusal():
+    episodes = [episode("create", "PEP: 9999\n"), episode("modify", DIFF)]
+    lines = [json.dumps(e, ensure_ascii=False).encode("utf-8") + b"\n" for e in episodes]
+    assert list(stream.episodes_of(lines, "made-up.jsonl")) == episodes
+    assert list(stream.episodes_of(iter(lines), "made-up.jsonl")) == episodes
+    with pytest.raises(ValueError, match=r"made-up\.jsonl: line 2 is not JSON"):
+        list(stream.episodes_of([lines[0], b"not json\n"], "made-up.jsonl"))
+    with pytest.raises(ValueError, match=r"made-up\.jsonl: line 1 is not a JSON object"):
+        list(stream.episodes_of([b"[1]\n"], "made-up.jsonl"))
+
+
+def test_read_episodes_is_episodes_of_over_the_lines_of_the_file(tmp_path):
+    episodes = [episode("create", "PEP: 9999\n"), episode("delete", "")]
+    path = tmp_path / "h-plus.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in episodes), encoding="utf-8")
+    with open(path, "rb") as handle:
+        assert list(stream.read_episodes(str(path))) == list(stream.episodes_of(handle, "x"))
+    path.write_text(json.dumps(episodes[0]) + "\nnot json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"h-plus\.jsonl: line 2 is not JSON"):
+        list(stream.read_episodes(str(path)))
+
+
 def test_read_episodes_keeps_line_separators_inside_strings_and_refuses_a_bad_line(tmp_path):
     # U+2028 and U+2029 may stand unescaped in JSON strings; a line ends at a newline only.
     e = episode("create", "first second third\r\n")

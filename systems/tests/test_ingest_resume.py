@@ -2,8 +2,9 @@
 in-place retries, the infrastructure stop and the stop after consecutive failures, what a resumed
 run attempts, the previous-episode window and saga predecessor each episode is given, the ingest
 log and run.json, and the totals of summary.json. It also checks that config.json agrees with the
-adapter and with the image's lock. Standard library only: neither graphiti-core nor anthropic is
-imported."""
+adapter and with the image's lock. How the loop's plumbing is given Graphiti's own values, and
+what the Dockerfile copies, is in test_graphiti_wiring.py. Standard library only: neither
+graphiti-core nor anthropic is imported."""
 
 from __future__ import annotations
 
@@ -14,7 +15,6 @@ import json
 import os
 import re
 import signal
-import time
 from pathlib import Path
 
 import pytest
@@ -569,35 +569,6 @@ def test_resume_drops_an_unfinished_last_line(tmp_path):
     assert harness.summary()["calls"] == 1 + 2
 
 
-def test_infrastructure_errors_are_told_from_the_episode_s_own():
-    assert ingest.infrastructure_error(ServiceUnavailable()) == "neo4j ServiceUnavailable"
-    assert ingest.infrastructure_error(ConnectionRefusedError()) == "builtins ConnectionError"
-    assert ingest.infrastructure_error(Overloaded()) == "anthropic OverloadedError"
-    assert ingest.infrastructure_error(ValueError("bad output")) is None
-    assert ingest.infrastructure_error(BadRequest("prompt is too long")) is None
-    # Through a cause, as Graphiti raises its RateLimitError from the SDK's, and inside a group.
-    try:
-        try:
-            raise failure("anthropic._exceptions", "RateLimitError")("429")
-        except Exception as cause:
-            raise RuntimeError("wrapped") from cause
-    except RuntimeError as wrapped:
-        assert ingest.infrastructure_error(wrapped) == "anthropic RateLimitError"
-    group = ExceptionGroup("several", [ValueError("x"), SessionExpired("lost")])
-    assert ingest.infrastructure_error(group) == "neo4j SessionExpired"
-    subclass = type("APITimeoutError", (EmbedderDown,), {"__module__": "openai._exceptions"})
-    assert ingest.infrastructure_error(subclass()) == "openai APIConnectionError"
-
-
-def test_the_image_ids_are_parsed_and_checked():
-    text = ",".join(f"{name}={value}" for name, value in IMAGES.items())
-    assert ingest.parse_image_ids(text) == IMAGES
-    for bad in (None, "", text.replace("egress=", "proxy="), text + ",neo4j=" + IMAGES["neo4j"],
-                text.replace(IMAGES["graphiti"], "asofbench/graphiti")):
-        with pytest.raises(ingest.Refused, match="ASOFBENCH_IMAGE_IDS"):
-            ingest.parse_image_ids(bad)
-
-
 def record_of(elapsed: list[float | None]) -> dict:
     return {"arm": "CF", "stream": "cf.jsonl", "stream_sha256": "0" * 64,
             "invocations": [{"images": IMAGES, "elapsed_s": value, "exit": 0}
@@ -696,17 +667,15 @@ def test_a_lock_that_a_killed_invocation_left_says_how_old_its_heartbeat_is(tmp_
     assert harness.run(resume=False) == ingest.EXIT_INGESTED
 
 
-def test_a_lock_is_touched_while_held_and_removed_only_by_its_holder(tmp_path, monkeypatch):
-    monkeypatch.setattr(ingest, "LOCK_HEARTBEAT_S", 0.05)
-    lock = tmp_path / "run.lock"
-    with ingest.hold_lock(tmp_path, "ingest"):
-        os.utime(lock, (time.time() - 3600, time.time() - 3600))
-        time.sleep(0.5)
-        assert time.time() - lock.stat().st_mtime < 60
-    assert not lock.exists()
-    with ingest.hold_lock(tmp_path, "ingest"):
-        lock.write_text(json.dumps({"token": "someone else's"}), encoding="utf-8")
-    assert json.loads(lock.read_text(encoding="utf-8")) == {"token": "someone else's"}
+def test_both_commands_refuse_a_held_lock_with_the_readme_md_pointer_they_always_gave(tmp_path):
+    harness = Harness(tmp_path, [episode(1, kind="create")])
+    with ingest.hold_lock(harness.out, "ingest"):
+        for attempt in (lambda: harness.run(resume=False), lambda: harness.remove(["any-uuid"])):
+            with pytest.raises(ingest.Refused) as caught:
+                attempt()
+            assert str(caught.value).endswith("once you are sure that its invocation is gone "
+                                              "(README.md says how to check), remove run.lock "
+                                              "and run again")
 
 
 def test_a_sigterm_unwinds_the_invocation_records_it_and_frees_the_lock(tmp_path):
@@ -754,20 +723,43 @@ def test_a_crash_is_recorded_in_run_json_as_exit_4(tmp_path, monkeypatch, capsys
     assert "crashed (RuntimeError)" in capsys.readouterr().err
 
 
-def test_run_json_is_written_whole_or_not_at_all(tmp_path, monkeypatch):
-    path = tmp_path / "run.json"
-    ingest.write_json(path, {"version": 1})
-    ingest.write_json(path, {"version": 2})
-    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 2}
-    assert [entry.name for entry in tmp_path.iterdir()] == ["run.json"]
+def test_a_crash_inside_a_group_is_recorded_with_the_class_of_the_group_s_exception(tmp_path,
+                                                                                   monkeypatch):
+    # An exception that escapes a group's worker, here the write of the ingest log on a full
+    # disk, reaches the invocation inside the group of one that the groups' TaskGroup raises:
+    # run.json records the class of that exception, and the invocation unwinds as at any crash.
+    harness = Harness(tmp_path, [episode(1, kind="create")])
 
-    def interrupted(source, target):
-        raise OSError("interrupted before the rename")
+    def full_disk(path, line):
+        raise OSError("No space left on device")
 
-    monkeypatch.setattr(ingest.os, "replace", interrupted)
-    with pytest.raises(OSError):
-        ingest.write_json(path, {"version": 3})
-    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 2}
+    monkeypatch.setattr(ingest, "append_line", full_disk)
+    with pytest.raises(ExceptionGroup) as caught:
+        harness.run(resume=False)
+    assert [type(error) for error in caught.value.exceptions] == [OSError]
+    (crash,) = harness.record()["invocations"]
+    assert (crash["exit"], crash["crash"]) == (ingest.EXIT_CRASHED, "OSError")
+    assert crash["elapsed_s"] is not None and harness.engines[0].closed
+    assert not (harness.out / "run.lock").exists()
+
+
+def test_run_json_records_each_invocation_with_the_fields_and_the_order_it_always_had(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={ids[1]: ["orphan"]}) == ingest.EXIT_STOPPED
+    assert harness.remove([f"uuid-{ids[1]}"]) == ingest.EXIT_INGESTED
+    record = harness.record()
+    assert list(record) == ["stream", "stream_sha256", "arm", "invocations"]
+    ingestion, removal = record["invocations"]
+    assert list(ingestion) == ["command", "started_at", "resume", "skipped", "images", "elapsed_s",
+                               "exit", "stop", "crash"]
+    assert list(removal) == ["command", "started_at", "uuids", "removed", "images", "elapsed_s",
+                             "exit", "stop", "crash"]
+    assert (ingestion["command"], ingestion["resume"], ingestion["skipped"]) == (
+        "ingest", False, [])
+    assert ingestion["stop"] == {"episode_id": ids[1], "error": "left in the store"}
+    assert (ingestion["images"], removal["images"]) == (IMAGES, IMAGES)
 
 
 def test_the_operator_can_skip_an_episode_that_keeps_stopping_the_run(tmp_path):

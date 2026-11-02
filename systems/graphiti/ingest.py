@@ -67,6 +67,17 @@ it; 4 when it crashes, which run.json records with the exception's class.
 episode that an attempt left there, under the same lock, after the same network check, and
 records its invocation in run.json.
 
+What every system's run shares (the lock, the SIGTERM handling, run.json's invocation records
+and their atomic writes, the network check and the wait for the services, the image IDs, the
+classification of infrastructure errors, the stop and the exit statuses, and the key check, the
+log's lines and error texts, the SHA-256 of a file and the report of a crash) is in
+``asofbench_systems.run``, with the network check's flags that every system gives it
+(``NETCHECK_ARGS``). This module gives it Graphiti's own values (``INFRASTRUCTURE``,
+``IMAGE_NAMES``, ``README``, ``SERVICES``, ``MOUNTS`` and the waits) and re-exports its names, so
+that ``infrastructure_error``, ``parse_image_ids``, ``check_key_file`` and ``netcheck_preflight``
+here are the shared functions with those values given, and ``EXIT_INGESTED`` is its
+``EXIT_DONE``.
+
 The state, log and summary functions use only the standard library; graphiti-core and anthropic
 are imported only by adapter.open_engine.
 """
@@ -75,33 +86,50 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
-import hashlib
 import json
 import logging
 import os
-import re
-import signal
-import socket
-import subprocess
 import sys
-import threading
 import time
-import traceback
-import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 from asofbench_systems import llm, usage
+from asofbench_systems import run as plumbing
+from asofbench_systems.run import EXIT_CRASHED as EXIT_CRASHED  # re-exported: crashed's status
+from asofbench_systems.run import (
+    EXIT_DONE,
+    EXIT_FAILED,
+    EXIT_FAILURES,
+    EXIT_STOPPED,
+    NETCHECK,
+    NETCHECK_ARGS,
+    RUN,
+    Refused,
+    Stop,
+    append_line,
+    cancelled_on_sigterm,
+    crashed,
+    drop_unfinished_line,
+    error_text,
+    hold_lock,
+    new_invocation,
+    read_jsonl,
+    recorded,
+    sha256_file,
+    utc_now,
+    write_json,
+)
 from asofbench_systems.stream import read_episodes
 from graphiti import adapter
 
+# Graphiti's name for the exit status 0 that every runner shares (asofbench_systems.run): every
+# episode of the stream is ingested.
+EXIT_INGESTED = EXIT_DONE
 ARMS = ("H+", "H-", "CF")
-LOG, USAGE, SUMMARY, NETCHECK, RUN, LOCK = ("ingest-log.jsonl", "usage.jsonl", "summary.json",
-                                            "netcheck.json", "run.json", "run.lock")
+LOG, USAGE, SUMMARY = "ingest-log.jsonl", "usage.jsonl", "summary.json"
 LOG_FIELDS = ("episode_id", "proposal", "group_id", "episode_uuid", "ok", "error", "started_at",
               "wall_s", "text_chars", "attempts", "invocation")
 # The outcomes of the attempt that a usage line fell in (``attempt_outcome``), by which
@@ -114,51 +142,38 @@ EPISODE_FIELDS = ("episode_id", "corpus", "repo", "proposal", "ref", "recorded_a
 RETRY_DELAYS_S = (30.0, 120.0)
 # Logged failures in a row, in one group, that stop the run.
 MAX_CONSECUTIVE_FAILURES = 5
-EXIT_INGESTED, EXIT_FAILED, EXIT_STOPPED, EXIT_FAILURES, EXIT_CRASHED = 0, 1, 2, 3, 4
 SKIPPED = "skipped by the operator after repeated infrastructure stops"
 # The usage context of the model calls that remove_episode makes.
 REMOVAL_CONTEXT = "remove-episode:"
-# How much of an exception's message the log keeps.
-ERROR_CHARS = 300
 # The prompt length up to which the price basis's prices hold (section 13).
 PRICED_INPUT_TOKENS = 100_000
 # The exceptions that stop a run as infrastructure errors, by the top-level package that defines
-# them and their class name, matched along each class's MRO and through an exception's causes.
-# The SDKs raise theirs only after their own retries.
+# them and their class name, matched along each class's MRO and through an exception's causes:
+# those that every system's run shares (the Anthropic API and the standard library's connection
+# errors), those of the services that Graphiti runs, Neo4j and the embedder, whose client is the
+# OpenAI SDK, and Graphiti's own RateLimitError, which wraps the Anthropic SDK's. The SDKs raise
+# theirs only after their own retries.
 INFRASTRUCTURE = {
-    "neo4j": {"ServiceUnavailable", "SessionExpired", "SessionError", "DatabaseUnavailable"},
-    "openai": {"APIConnectionError", "InternalServerError"},
-    "anthropic": {"APIConnectionError", "RateLimitError", "OverloadedError", "InternalServerError",
-                  "AuthenticationError", "PermissionDeniedError"},
-    "graphiti_core": {"RateLimitError"},
-    "builtins": {"ConnectionError"},
+    **plumbing.INFRASTRUCTURE,
+    "neo4j": frozenset({"ServiceUnavailable", "SessionExpired", "SessionError",
+                        "DatabaseUnavailable"}),
+    "openai": frozenset({"APIConnectionError", "InternalServerError"}),
+    "graphiti_core": frozenset({"RateLimitError"}),
 }
 # The images a run records, as the launcher gives them in ASOFBENCH_IMAGE_IDS.
 IMAGE_NAMES = ("graphiti", "egress", "embedder", "neo4j")
-IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
-# The network check, as systems/README.md runs it, with this system's services and mounts.
+# Where this system's refusals point for what to do next.
+README = "systems/graphiti/README.md"
+# The network check, as systems/README.md runs it, with this system's services and mounts:
+# NETCHECK_ARGS are the flags that every system gives it (asofbench_systems.run), and the run adds
+# ``--services embedder:8080,neo4j:7687`` (SERVICES, sorted) and ``--mounts
+# /input,/output,/run/secrets``.
 NETCHECK_SCRIPT = Path(__file__).resolve().parents[1] / "env" / "netcheck.py"
-NETCHECK_ARGS = (
-    "--proxy", "http://egress:3128", "--allow", "api.anthropic.com:443",
-    "--deny", "github.com:443,huggingface.co:443,pypi.org:443,peps.python.org:443,"
-              "eips.ethereum.org:443,ercs.ethereum.org:443",
-    "--deny", "host.docker.internal:443,gateway.docker.internal:443",
-    "--direct", "140.82.112.3:443,1.1.1.1:443",
-    "--services", "embedder:8080,neo4j:7687",
-    "--mounts", "/input,/output,/run/secrets",
-)
 SERVICES = (("neo4j", 7687), ("embedder", 8080))
-# Seconds between the touches that show a held lock's invocation is alive.
-LOCK_HEARTBEAT_S = 30.0
+MOUNTS = ("/input", "/output", "/run/secrets")
 # How long the run waits for the services to accept connections (the embedder loads its model
 # first), and how often it tries.
 SERVICE_WAIT_S, SERVICE_RETRY_S = 600.0, 2.0
-CHUNK = 1 << 20
-
-
-class Refused(Exception):
-    """The invocation cannot start, or cannot go on with the store it found: nothing is
-    ingested."""
 
 
 @dataclass
@@ -173,188 +188,24 @@ class ProposalState:
         self.saga_previous = uuid
 
 
-class Stop:
-    """The first reason to stop the run: its exit status, its message and what run.json records
-    of it; an attempt under way finishes."""
-
-    def __init__(self) -> None:
-        self.code: int | None = None
-        self.reason: str | None = None
-        self.record: dict | None = None
-        self._requested = asyncio.Event()
-
-    def request(self, code: int, reason: str, record: dict) -> None:
-        if self.code is None:
-            self.code, self.reason, self.record = code, reason, record
-            self._requested.set()
-
-    async def wait(self, seconds: float) -> bool:
-        """Waits ``seconds``; True when a stop is requested meanwhile."""
-        try:
-            await asyncio.wait_for(self._requested.wait(), timeout=seconds)
-        except TimeoutError:
-            return False
-        return True
-
-
 def infrastructure_error(error: BaseException) -> str | None:
     """``package Class`` of the first exception in ``error``, its causes and, for a group, its
     members, that INFRASTRUCTURE names; None when there is none, so that the error is the
-    episode's."""
-    seen, pending = set(), [error]
-    while pending:
-        current = pending.pop(0)
-        if current is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        for cls in type(current).__mro__:
-            package = cls.__module__.split(".", 1)[0]
-            if cls.__name__ in INFRASTRUCTURE.get(package, ()):
-                return f"{package} {cls.__name__}"
-        pending += [current.__cause__, current.__context__,
-                    *getattr(current, "exceptions", ())]
-    return None
+    episode's (``asofbench_systems.run.infrastructure_error`` with Graphiti's table)."""
+    return plumbing.infrastructure_error(error, INFRASTRUCTURE)
 
 
 def parse_image_ids(text: str | None) -> dict[str, str]:
     """The image IDs of ``name=sha256:...`` entries, comma-separated, one for each of
-    IMAGE_NAMES; Refused otherwise."""
-    entries = [entry.strip() for entry in (text or "").split(",") if entry.strip()]
-    images = dict(entry.partition("=")[::2] for entry in entries)
-    if (len(images) != len(entries) or set(images) != set(IMAGE_NAMES)
-            or not all(IMAGE_ID.fullmatch(value) for value in images.values())):
-        raise Refused("ASOFBENCH_IMAGE_IDS must give the ID (sha256:...) of each image the run "
-                      f"uses, as name=ID entries for {', '.join(IMAGE_NAMES)} (systems/graphiti/"
-                      "README.md)")
-    return {name: images[name] for name in IMAGE_NAMES}
+    IMAGE_NAMES; Refused otherwise (``asofbench_systems.run.parse_image_ids`` with Graphiti's
+    images and README)."""
+    return plumbing.parse_image_ids(text, IMAGE_NAMES, README)
 
 
 def check_key_file(key_file: str) -> None:
-    """Refused unless the API key file can be read and holds a key. The refusal names the file and
-    why, never what it holds: on a Linux host the secret keeps the host file's owner and mode,
-    which the container's user, uid 10001, must be able to read."""
-    try:
-        llm.read_key(key_file)
-    except llm.KeyFileError as error:
-        raise Refused(f"the API key file {error}: it reaches the container as the Docker secret, "
-                      "which the container's user, uid 10001, must be able to read "
-                      "(systems/graphiti/README.md)") from None
-
-
-def held_by(path: Path) -> str:
-    """Who holds the lock at ``path``, and how old its heartbeat is, as far as the file says."""
-    try:
-        holder = json.loads(path.read_text(encoding="utf-8"))
-        age = time.time() - path.stat().st_mtime
-    except (OSError, ValueError):
-        return "its holder cannot be read"
-    return (f"{holder.get('command')} in container {holder.get('host')}, pid {holder.get('pid')}, "
-            f"since {holder.get('since')}; its heartbeat is {age:.0f} s old")
-
-
-@contextlib.contextmanager
-def hold_lock(out_dir: Path, command: str = "ingest") -> Iterator[None]:
-    """Holds the output directory's lock: the invocation creates run.lock with O_CREAT|O_EXCL,
-    which excludes across the containers that share a bind mount (flock and lockf do not, on
-    Docker Desktop's), touches it every LOCK_HEARTBEAT_S while it runs, and removes it at its end
-    if it is still its own. Refused at once when the file exists: another invocation holds it,
-    or a killed one left it, whose heartbeat has stopped."""
-    path = out_dir / LOCK
-    token = uuid.uuid4().hex
-    # The lock is the file's existence, not flock(2) or lockf(3). Two containers that shared one
-    # bind-mounted directory on Docker Desktop were each granted an exclusive flock, and each a
-    # lockf, on the same file there, so neither excludes the other invocation; an O_EXCL create
-    # of a file that exists fails with EEXIST in the second container, so it does. The cost is
-    # that an invocation killed outright leaves the file, which its stopped heartbeat shows and
-    # the operator removes (README.md).
-    try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        raise Refused(f"another invocation holds the lock on this output directory ({LOCK}: "
-                      f"{held_by(path)}): one invocation at a time. A killed invocation leaves "
-                      f"its lock, whose heartbeat stops (a live one touches it every "
-                      f"{LOCK_HEARTBEAT_S:g} s): once you are sure that its invocation is gone "
-                      f"(README.md says how to check), remove {LOCK} and run again") from None
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"token": token, "command": command,
-                                 "host": socket.gethostname(), "pid": os.getpid(),
-                                 "since": utc_now()}) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    released = threading.Event()
-
-    def heartbeat() -> None:
-        while not released.wait(LOCK_HEARTBEAT_S):
-            with contextlib.suppress(OSError):
-                os.utime(path)
-
-    beating = threading.Thread(target=heartbeat, name="run.lock heartbeat", daemon=True)
-    beating.start()
-    try:
-        yield
-    finally:
-        released.set()
-        beating.join()
-        with contextlib.suppress(OSError, ValueError):
-            if json.loads(path.read_text(encoding="utf-8")).get("token") == token:
-                path.unlink()
-
-
-@contextlib.contextmanager
-def cancelled_on_sigterm() -> Iterator[None]:
-    """Cancels the running task on SIGTERM, which ``docker stop`` sends and which a container's
-    first process otherwise ignores, so that the invocation unwinds: it records its exit status
-    4 in run.json, closes Graphiti and releases its lock. The handler runs on the event loop, so
-    while the wait for the services or the network check blocks the loop it cannot run; Docker's
-    SIGKILL, 10 s after the SIGTERM, then ends the invocation outright, which leaves its lock and
-    a null exit in run.json (README.md says how to recover)."""
-    loop, task = asyncio.get_running_loop(), asyncio.current_task()
-    try:
-        loop.add_signal_handler(signal.SIGTERM, task.cancel)
-    except (NotImplementedError, RuntimeError, ValueError):
-        yield
-        return
-    try:
-        yield
-    finally:
-        loop.remove_signal_handler(signal.SIGTERM)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def read_jsonl(path: Path) -> list[dict]:
-    """The JSON lines of ``path``, split at newlines only, none when it does not exist; Refused
-    for a line that is not JSON."""
-    if not path.exists():
-        return []
-    lines = []
-    with open(path, "rb") as handle:
-        for number, raw in enumerate(handle, 1):
-            try:
-                lines.append(json.loads(raw.decode("utf-8")))
-            except ValueError:
-                raise Refused(f"{path.name}: line {number} is not JSON") from None
-    return lines
-
-
-def drop_unfinished_line(path: Path) -> int:
-    """Removes a last line that has no line break, which an interrupted write leaves, from the
-    file at ``path``; returns the number of bytes removed."""
-    if not path.exists():
-        return 0
-    data = path.read_bytes()
-    if not data or data.endswith(b"\n"):
-        return 0
-    keep = data.rfind(b"\n") + 1
-    with open(path, "r+b") as handle:
-        handle.truncate(keep)
-    return len(data) - keep
+    """Refused unless the API key file can be read and holds a key; the refusal names the file and
+    why, never what it holds (``asofbench_systems.run.check_key_file`` with Graphiti's README)."""
+    plumbing.check_key_file(key_file, README)
 
 
 def read_stream(stream: Path) -> list[dict]:
@@ -563,33 +414,6 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
             "images": images}
 
 
-def error_text(error: BaseException, key_file: str) -> str:
-    """The log's ``error``: the exception's class and the first ERROR_CHARS characters of its
-    message, with the key taken out first."""
-    message = llm.redact(str(error), key_file)[:ERROR_CHARS]
-    return f"{type(error).__name__}: {message}" if message else type(error).__name__
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def append_line(path: Path, line: dict) -> None:
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(line, ensure_ascii=False) + "\n")
-
-
-def write_json(path: Path, value: dict) -> None:
-    """Writes ``value`` to ``path`` atomically: a temporary file in the same directory, then a
-    rename over the old one, so that an interrupted write never leaves half a file."""
-    temporary = path.with_name(f".{path.name}.tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, indent=2) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-
-
 async def check_store(engine, log: list[dict]) -> None:
     """Refused unless the store holds exactly the episodes that ``log`` records as ingested."""
     stored = await engine.stored_episodes()
@@ -679,57 +503,14 @@ async def ingest_group(engine, group: str, episodes: list[dict],
             return
 
 
-def wait_for_services(services=SERVICES, wait_s: float = SERVICE_WAIT_S) -> None:
-    """Waits until every service accepts a TCP connection, or ``wait_s`` seconds have passed (the
-    network check then fails on the one that does not)."""
-    deadline = time.monotonic() + wait_s
-    for target in services:
-        while True:
-            try:
-                socket.create_connection(target, timeout=SERVICE_RETRY_S).close()
-                break
-            except OSError:
-                if time.monotonic() > deadline:
-                    return
-                time.sleep(SERVICE_RETRY_S)
-
-
 def netcheck_preflight(out_dir: Path) -> int:
     """Waits for the services and runs the network check, which writes its report to
     ``out_dir/netcheck.json``; an earlier invocation's report is kept as ``netcheck-<n>.json``.
-    Returns the check's exit status."""
-    wait_for_services()
-    report = out_dir / NETCHECK
-    if report.exists():
-        n = 1
-        while (out_dir / f"netcheck-{n}.json").exists():
-            n += 1
-        report.rename(out_dir / f"netcheck-{n}.json")
-    done = subprocess.run([sys.executable, str(NETCHECK_SCRIPT), *NETCHECK_ARGS,
-                           "--report", str(report)], check=False)
-    return done.returncode
-
-
-@contextlib.contextmanager
-def recorded(record: dict, invocation: dict, run_path: Path, begun: float) -> Iterator[None]:
-    """Records ``invocation`` in run.json at once, and again at the end with its elapsed time
-    and, unless the body set it, its exit status: 2 for a refusal, 4 with the exception's class
-    for a crash."""
-    record["invocations"].append(invocation)
-    write_json(run_path, record)
-    try:
-        yield
-    except Refused:
-        if invocation["exit"] is None:
-            invocation["exit"] = EXIT_STOPPED
-        raise
-    except BaseException as error:
-        invocation["exit"], invocation["crash"] = EXIT_CRASHED, type(error).__name__
-        raise
-    finally:
-        if invocation["elapsed_s"] is None:
-            invocation["elapsed_s"] = round(time.monotonic() - begun, 3)
-        write_json(run_path, record)
+    Returns the check's exit status (``asofbench_systems.run.netcheck_preflight`` with
+    Graphiti's services, mounts and waits)."""
+    return plumbing.netcheck_preflight(out_dir, script=NETCHECK_SCRIPT, args=NETCHECK_ARGS,
+                                       services=SERVICES, mounts=MOUNTS, wait_s=SERVICE_WAIT_S,
+                                       retry_s=SERVICE_RETRY_S)
 
 
 async def run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: dict[str, str],
@@ -783,9 +564,7 @@ async def _run(stream: Path, arm: str, out_dir: Path, *, resume: bool, images: d
     # This invocation's place in run.json, which the lock keeps from changing meanwhile.
     number = len(record["invocations"]) + 1
     skip_lines = plan_skips(episodes, log, skip, number)
-    invocation = {"command": "ingest", "started_at": utc_now(), "resume": resume, "skipped": [],
-                  "images": dict(images), "elapsed_s": None, "exit": None, "stop": None,
-                  "crash": None}
+    invocation = new_invocation("ingest", images, resume=resume, skipped=[])
     with recorded(record, invocation, run_path, begun):
         if preflight is not None and preflight(out_dir) != 0:
             progress(f"ingest: the network check failed (see {NETCHECK}); nothing was ingested")
@@ -870,9 +649,7 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
             raise Refused(f"the log records {', '.join(refused)} as ingested; only an episode it "
                           "does not record is removed")
         number = len(record["invocations"]) + 1
-        invocation = {"command": "remove-episodes", "started_at": utc_now(),
-                      "uuids": list(uuids), "removed": [], "images": dict(images),
-                      "elapsed_s": None, "exit": None, "stop": None, "crash": None}
+        invocation = new_invocation("remove-episodes", images, uuids=list(uuids), removed=[])
         with recorded(record, invocation, run_path, begun):
             if preflight is not None and preflight(out_dir) != 0:
                 progress(f"remove-episodes: the network check failed (see {NETCHECK}); nothing "
@@ -896,14 +673,6 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
                 await engine.close()
             invocation["exit"] = status
             return status
-
-
-def crashed(error: BaseException, key_file: str, prefix: str) -> int:
-    """Prints a crash, the key taken out, and returns its exit status."""
-    text = "".join(traceback.format_exception(error))
-    print(f"{prefix}: crashed ({type(error).__name__}); run.json records exit "
-          f"{EXIT_CRASHED}\n{llm.redact(text, key_file)}", file=sys.stderr)
-    return EXIT_CRASHED
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,0 +1,105 @@
+# Grep at D's run environment for one arm and date (systems/README.md): the egress proxy and the
+# agent, in grep at D's image (built FROM the reader's), on `inner`, an internal network with no
+# route out and no address of the host on it, the proxy alone also on `outer`; and the sandbox,
+# which runs the agent's commands, on `sandbox_net` alone, an internal network that only it and
+# the agent share. The sandbox holds the date's tree read-only at /repo and nothing else of the
+# host: no secret, no other mount, no capability, a read-only root and a 16 MiB tmpfs at /tmp.
+# run_dates.py runs one compose project for each date, and takes it down before the next:
+#
+#     ASOFBENCH_RUN_INPUT=<the date's input/<file>/, which holds its requests.jsonl alone> \
+#     ASOFBENCH_RUN_OUTPUT=<the date's output/<file>/> \
+#     ASOFBENCH_RUN_TREE=<the date's tree, which asofbench materialize wrote> \
+#     ASOFBENCH_ANTHROPIC_KEY_FILE=<the file that holds the API key> \
+#     ASOFBENCH_IMAGE_IDS=<grep-at-d=sha256:...,reader=sha256:...,egress=sha256:...,sandbox=sha256:...> \
+#     docker compose -f systems/grep-at-d/compose.yaml -p asofbench-grep-at-d-<run> \
+#         run --rm agent grep_at_d --requests /input/requests.jsonl \
+#         --out /output/responses.jsonl --model claude-haiku-5-5 --api-errors-before <n>
+#
+# The first four variables are absolute paths (compose reads a relative one from this file's
+# directory) and are needed by every compose command on this file, `down` included. The key
+# reaches the agent's container only as the Docker secret /run/secrets/anthropic_api_key. The
+# image IDs, grep at D's own and the reader's that it is built from among them, are recorded in
+# the date's run.json; the agent refuses to start without them.
+#
+# Each service has a memory limit, and each is the first that the kernel stops if the machine runs
+# short of memory (oom_score_adj). The proxy restarts when it stops without a `docker stop`; the
+# sandbox does not, and an answer that loses it stops the date's run with exit status 2, to be
+# resumed in a fresh environment.
+name: asofbench-grep-at-d
+
+services:
+  egress:
+    image: asofbench/egress
+    build: ../env/egress
+    environment:
+      EGRESS_ALLOW: api.anthropic.com:443
+      # Longer than the 600 s the client gives a request (config.json), so that the proxy never
+      # closes a tunnel while the client still waits on a response.
+      EGRESS_IDLE_TIMEOUT: "660"
+    networks:
+      - inner
+      - outer
+    mem_limit: 128m
+    oom_score_adj: 1000
+    restart: unless-stopped
+
+  sandbox:
+    image: asofbench/sandbox
+    build: sandbox
+    read_only: true
+    init: true
+    volumes:
+      - ${ASOFBENCH_RUN_TREE:?}:/repo:ro
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+    networks:
+      - sandbox_net
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ipc: none
+    pids_limit: 256
+    mem_limit: 512m
+    oom_score_adj: 1000
+
+  agent:
+    image: asofbench/grep-at-d
+    build:
+      context: ..
+      dockerfile: grep-at-d/Dockerfile
+    environment:
+      HTTPS_PROXY: http://egress:3128
+      ASOFBENCH_IMAGE_IDS: ${ASOFBENCH_IMAGE_IDS:-}
+    volumes:
+      - ${ASOFBENCH_RUN_INPUT:?}:/input:ro
+      - ${ASOFBENCH_RUN_OUTPUT:?}:/output
+    secrets:
+      - anthropic_api_key
+    networks:
+      - inner
+      - sandbox_net
+    mem_limit: 1g
+    oom_score_adj: 1000
+    depends_on:
+      egress:
+        condition: service_started
+      sandbox:
+        condition: service_started
+
+networks:
+  inner:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+  sandbox_net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+  outer: {}
+
+secrets:
+  anthropic_api_key:
+    file: ${ASOFBENCH_ANTHROPIC_KEY_FILE:?}

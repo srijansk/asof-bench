@@ -29,7 +29,8 @@ RUN groupadd --system --gid 10001 graphiti \
 
 # The adapter's own files, one by one: the shared package, the network check and the adapter.
 COPY common/asofbench_systems/__init__.py common/asofbench_systems/llm.py \
-     common/asofbench_systems/stream.py common/asofbench_systems/usage.py /app/asofbench_systems/
+     common/asofbench_systems/run.py common/asofbench_systems/stream.py \
+     common/asofbench_systems/usage.py /app/asofbench_systems/
 COPY env/netcheck.py /app/env/netcheck.py
 COPY graphiti/adapter.py graphiti/ingest.py graphiti/config.json /app/graphiti/
 RUN printf '#!/bin/sh\nexec python -m graphiti.ingest "$@"\n' > /usr/local/bin/ingest \
@@ -43,5 +44,11 @@ USER 10001:10001
 # config.json records and that Graphiti builds as the adapter configures it, so that an image
 # that builds is one that ingests as configured.
 RUN --network=none python -m graphiti.adapter --self-test
+# The self-test imports the adapter only. The `ingest` command imports more, the shared run.py
+# among it. An image that lacked a file that ingest imports would build and fail only when its
+# container first ingested, and the tests that run in the image read the files they are given,
+# not the image's own. So the build imports ingest as the command does, with no network, and
+# fails here instead.
+RUN --network=none python -c "import graphiti.ingest"
 
 CMD ["ingest", "--help"]

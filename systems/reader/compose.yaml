@@ -1,0 +1,73 @@
+# The reader's run environment (systems/README.md): the egress proxy and the reader container on
+# `inner`, an internal network with no route out and no address of the host on it, and the proxy
+# alone also on `outer`. The reader runs no service of its own. Each run is one compose project:
+#
+#     ASOFBENCH_RUN_INPUT=<the run directory's input/, which holds its requests.jsonl alone> \
+#     ASOFBENCH_RUN_OUTPUT=<the run directory's output/> \
+#     ASOFBENCH_ANTHROPIC_KEY_FILE=<the file that holds the API key> \
+#     ASOFBENCH_IMAGE_IDS=<reader=sha256:...,egress=sha256:...> \
+#     docker compose -f systems/reader/compose.yaml -p asofbench-reader-<run> \
+#         run --rm reader answer_requests --requests /input/requests.jsonl \
+#         --out /output/responses.jsonl --model claude-haiku-5-5
+#
+# The first three variables are absolute paths (compose reads a relative one from this file's
+# directory) and are needed by every compose command on this file, `down` included. The key
+# reaches the container only as the Docker secret /run/secrets/anthropic_api_key. The image IDs,
+# which systems/README.md says how to read, are recorded in run.json; the reader refuses to start
+# without them. The harness's keys.jsonl and plan.json, beside input/ and output/ in the run
+# directory, are never mounted, and the reader refuses a requests file that is not alone in its
+# directory.
+#
+# Each service has a memory limit, and each is the first that the kernel stops if the machine
+# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else. The
+# proxy restarts when it stops without a `docker stop` (an out-of-memory kill included); an
+# answering run that its absence interrupts stops with exit status 2, to be resumed.
+name: asofbench-reader
+
+services:
+  egress:
+    image: asofbench/egress
+    build: ../env/egress
+    environment:
+      EGRESS_ALLOW: api.anthropic.com:443
+      # Longer than the 600 s the client gives a request (config.json), so that the proxy never
+      # closes a tunnel while the client still waits on a response.
+      EGRESS_IDLE_TIMEOUT: "660"
+    networks:
+      - inner
+      - outer
+    mem_limit: 128m
+    oom_score_adj: 1000
+    restart: unless-stopped
+
+  reader:
+    image: asofbench/reader
+    build:
+      context: ..
+      dockerfile: reader/Dockerfile
+    environment:
+      HTTPS_PROXY: http://egress:3128
+      ASOFBENCH_IMAGE_IDS: ${ASOFBENCH_IMAGE_IDS:-}
+    volumes:
+      - ${ASOFBENCH_RUN_INPUT:?}:/input:ro
+      - ${ASOFBENCH_RUN_OUTPUT:?}:/output
+    secrets:
+      - anthropic_api_key
+    networks:
+      - inner
+    mem_limit: 1g
+    oom_score_adj: 1000
+    depends_on:
+      egress:
+        condition: service_started
+
+networks:
+  inner:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+  outer: {}
+
+secrets:
+  anthropic_api_key:
+    file: ${ASOFBENCH_ANTHROPIC_KEY_FILE:?}

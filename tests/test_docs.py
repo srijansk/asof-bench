@@ -1,6 +1,7 @@
 """The documents as a reader meets them: every link between the Markdown files reaches a file and
-a heading, docs/data-format.md names exactly the fields the data files and the code hold, the toy
-world runs, and the source distribution holds every tracked top-level file and directory."""
+a heading, docs/data-format.md names exactly the fields the data files and the code hold,
+CONTRIBUTING.md's commands are the ones CI runs, the toy world runs, and the source distribution
+holds every tracked top-level file and directory."""
 
 from __future__ import annotations
 
@@ -174,6 +175,47 @@ def test_the_data_format_page_names_the_stream_and_answer_row_fields_the_code_ho
     assert stream == {field.name for field in dataclasses.fields(Episode)}
     (rows,) = documented(page, "Answer rows, entries and items")
     assert rows == set(ROW_FIELDS) | set(ACCOUNTING)
+
+
+def ci_steps(workflow: str | None = None) -> list[str]:
+    """The commands of CI's workflow (or of ``workflow``), one for each step's ``run:``, whether
+    the step begins with it (``- run:``) or names itself first (``- name:``, then ``run:``), in
+    its order."""
+    if workflow is None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    return re.findall(r"^\s*(?:- )?run: (.+)$", workflow, re.MULTILINE)
+
+
+def test_ci_steps_reads_a_step_that_names_itself_first():
+    workflow = ("    steps:\n      - run: one\n      - name: Two\n        run: two\n"
+                "      - uses: x\n")
+    assert ci_steps(workflow) == ["one", "two"]
+
+
+def development_commands() -> list[str]:
+    """The commands that CONTRIBUTING.md's Development section gives, one per line of its first
+    code block, in its order."""
+    text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    section = text.split("\n## Development\n", 1)[1].split("\n## ", 1)[0]
+    block = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    return [line for line in block.splitlines() if line.strip()]
+
+
+def test_contributing_lists_every_command_that_ci_runs_and_in_its_order():
+    """Each step of CI's workflow but the one that installs uv is a command of CONTRIBUTING.md,
+    in the same order, so that a contributor runs what CI runs: they differ only in the
+    ``--python`` with which CI names its matrix's interpreter, and in a ``UV_OFFLINE=1`` before a
+    local command. The one local command that CI does not run is the corpus tests', which sets
+    ASOFBENCH_CLONES."""
+    steps = ci_steps()
+    installs = [step for step in steps if step.startswith("python -m pip install uv==")]
+    assert len(installs) == 1 and not any(step.strip() in ("|", ">") for step in steps)
+    ci = [re.sub(r' --python "[^"]*"', "", step) for step in steps if step not in installs]
+    assert all(step.startswith("uv run --frozen ") and "--python" not in step for step in ci)
+    local = [command.removeprefix("UV_OFFLINE=1 ") for command in development_commands()]
+    corpus = [command for command in local if command.startswith("ASOFBENCH_CLONES=")]
+    assert len(corpus) == 1
+    assert [command for command in local if command not in corpus] == ci
 
 
 def test_the_toy_world_runs_every_command(tmp_path, capsys):

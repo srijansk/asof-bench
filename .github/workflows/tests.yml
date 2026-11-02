@@ -34,4 +34,8 @@ jobs:
       # the image. `python -m pytest` runs the interpreter that sees the --with packages, which the
       # environment's own pytest script would not.
       - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev --with anthropic==0.111.0 --with httpx==0.28.1 python -m pytest systems/tests/test_llm_client.py
+      # The answering call's tests, the reader's run through the real client and grep at D's
+      # agent loop, with the SDK and httpx at the versions that the reader image's lock pins, and
+      # the shared client's tests again with them, since the reader builds its client with that SDK.
+      - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev --with anthropic==0.78.0 --with httpx==0.28.1 python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py systems/tests/test_grep_agent.py
       - run: uv run --frozen --python "${{ steps.python.outputs.python-path }}" --extra dev ruff check src tests examples systems

@@ -1,0 +1,817 @@
+"""The answering harness on the host (systems/harness.py), on the toy world that
+examples/toy_world.py builds: the requests it writes and what each holds, what never leaves the
+host, the items and entries it asks, and the answer rows it writes from a run's responses, which
+`asofbench score` scores as an outside entry; and grep at D's requests, one file for each arm and
+date with dates.json beside them, and its rows, gathered from every date's output. It needs git,
+which builds the toy world's repositories, and the asofbench package, so the reader image skips
+it; it makes no model call and reads no v0.1 file."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import itertools
+import json
+import os
+import shutil
+import uuid
+from collections import Counter
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("asofbench")
+if shutil.which("git") is None:
+    pytest.skip("the toy world's repositories need git", allow_module_level=True)
+
+import harness  # noqa: E402 - systems/ is on the path (conftest.py)
+from reader import answer_requests  # noqa: E402
+
+from asofbench import cli, scoring  # noqa: E402
+from asofbench.stream import STREAM_FILES  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[2]
+NINE = ["id", "system", "arm", "run", "answer", "tokens_in", "tokens_out", "wall_s",
+        "tool_calls"]
+
+
+@pytest.fixture(scope="module")
+def toy(tmp_path_factory) -> Path:
+    """The toy world, built once: its data (toy-data/) and its H- stream."""
+    spec = importlib.util.spec_from_file_location("toy_world", ROOT / "examples" / "toy_world.py")
+    toy_world = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(toy_world)
+    root = tmp_path_factory.mktemp("toy") / "world"
+    assert toy_world.main([str(root)]) == 0
+    return root
+
+
+@pytest.fixture(scope="module")
+def questions(toy) -> list[dict]:
+    return lines(toy / "toy-data" / "questions.jsonl")
+
+
+def lines(path: Path) -> list[dict]:
+    """The JSON lines of a file, split at newlines only, as the reader splits a requests file."""
+    return [json.loads(line) for line in path.read_bytes().decode("utf-8").split("\n") if line]
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def make_requests(toy: Path, out: Path, *extra: str, system: str = "closed-book") -> int:
+    return harness.main(["requests", "--system", system, "--data", str(toy / "toy-data"),
+                         "--out-dir", str(out), *extra])
+
+
+def make_rows(run_dir: Path, out: Path, system: str = "closed-book") -> int:
+    return harness.main(["rows", "--system", system, "--run-dir", str(run_dir), "--out", str(out)])
+
+
+def respond(run_dir: Path, answers: dict[str, object], **record) -> None:
+    """Writes what the reader would have written for ``answers`` (key to answer): its run.json and
+    one response per key, each with made-up costs."""
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    output = run_dir / "output"
+    (output / "run.json").write_text(json.dumps({
+        "requests": "requests.jsonl", "requests_sha256": plan["requests_sha256"],
+        "responses": "responses.jsonl", "model": "claude-haiku-5-5", "invocations": [],
+        **record}), encoding="utf-8")
+    with open(output / "responses.jsonl", "w", encoding="utf-8") as handle:
+        for n, (key, value) in enumerate(answers.items()):
+            handle.write(json.dumps({"key": key, "answer": value, "tokens_in": 100 + n,
+                                     "tokens_out": 5, "wall_s": 1.5, "tool_calls": 0,
+                                     "error": None if value is not None else "refusal",
+                                     "thinking_blocks": 1}) + "\n")
+
+
+def test_closed_book_is_asked_every_item_in_every_arm_it_lists_three_times(toy, questions,
+                                                                           tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir) == 0
+    requests = lines(run_dir / "input" / "requests.jsonl")
+    keys = lines(run_dir / "keys.jsonl")
+    expected = [(q["id"], arm, run) for q in questions for arm in q["arms"] for run in (1, 2, 3)]
+    assert [(k["id"], k["arm"], k["run"]) for k in keys] == expected
+    assert len(requests) == len(expected) == sum(len(q["arms"]) for q in questions) * 3
+    # keys.jsonl maps every key back, with the item's answer type, and keeps the items' order; the
+    # requests are in ascending key order, a random permutation of it, so that one item's requests
+    # are not next to each other.
+    by_id = {q["id"]: q for q in questions}
+    by_key = {k["key"]: k for k in keys}
+    assert [r["key"] for r in requests] == sorted(by_key)
+    assert [r["key"] for r in requests] != [k["key"] for k in keys]
+    for request in requests:
+        key = by_key[request["key"]]
+        assert list(key) == ["key", "id", "arm", "run", "answer_type"]
+        assert key["answer_type"] == by_id[key["id"]]["answer_type"]
+        assert request == {"key": key["key"], "question": by_id[key["id"]]["question"]}
+    # The run's input directory holds the requests and nothing else; the output one is empty.
+    assert sorted(p.name for p in (run_dir / "input").iterdir()) == ["requests.jsonl"]
+    assert list((run_dir / "output").iterdir()) == []
+    assert sorted(p.name for p in run_dir.iterdir()) == ["input", "keys.jsonl", "output",
+                                                         "plan.json"]
+
+
+def test_every_key_is_a_new_random_uuid4_and_no_request_carries_the_item(toy, questions,
+                                                                          tmp_path):
+    assert make_requests(toy, tmp_path / "a") == 0
+    assert make_requests(toy, tmp_path / "b") == 0
+    first = [r["key"] for r in lines(tmp_path / "a" / "input" / "requests.jsonl")]
+    second = [r["key"] for r in lines(tmp_path / "b" / "input" / "requests.jsonl")]
+    for key in first:
+        assert uuid.UUID(key).version == 4 and str(uuid.UUID(key)) == key
+    # Unique within a run, the three runs of an item and its two arms included, and never the
+    # same twice, so that a key says nothing of the item it stands for.
+    assert len(set(first)) == len(first)
+    assert not set(first) & set(second)
+    text = (tmp_path / "a" / "input" / "requests.jsonl").read_text(encoding="utf-8")
+    for q in questions:
+        assert q["id"] not in text
+    for request in lines(tmp_path / "a" / "input" / "requests.jsonl"):
+        assert set(request) == {"key", "question"}
+
+
+def test_plan_json_counts_the_requests_and_records_the_files_they_come_from(toy, questions,
+                                                                            tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir) == 0
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    data = toy / "toy-data"
+    assert plan["system"] == "closed-book"
+    assert plan["runs"] == [1, 2, 3]
+    assert plan["questions"] == {"file": "questions.jsonl",
+                                 "sha256": sha256(data / "questions.jsonl")}
+    assert plan["manifest"] == {"file": "MANIFEST.json", "sha256": sha256(data / "MANIFEST.json")}
+    assert plan["items"] is None
+    assert plan["requests"] == sum(len(q["arms"]) for q in questions) * 3
+    assert plan["requests_sha256"] == sha256(run_dir / "input" / "requests.jsonl")
+    assert plan["keys_sha256"] == sha256(run_dir / "keys.jsonl")
+    family = {q["id"]: q["family"] for q in questions}
+    tally = Counter((k["arm"], family[k["id"]], str(k["run"]))
+                    for k in lines(run_dir / "keys.jsonl"))
+    assert {(arm, fam, run): n for arm, by_family in plan["counts"].items()
+            for fam, by_run in by_family.items() for run, n in by_run.items()} == dict(tally)
+    # File names only: the plan holds no local path.
+    assert str(tmp_path) not in json.dumps(plan) and str(ROOT) not in json.dumps(plan)
+
+
+def test_items_and_runs_limit_the_requests(toy, questions, tmp_path):
+    pilot = toy / "toy-data" / "pilot.json"
+    assert make_requests(toy, tmp_path / "pilot", "--items", str(pilot)) == 0
+    keys = lines(tmp_path / "pilot" / "keys.jsonl")
+    listed = set(json.loads(pilot.read_text(encoding="utf-8"))["ids"])
+    assert {k["id"] for k in keys} == listed
+    by_id = {q["id"]: q for q in questions}
+    assert len(keys) == sum(len(by_id[i]["arms"]) for i in listed) * 3
+    plan = json.loads((tmp_path / "pilot" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["items"] == {"file": "pilot.json", "sha256": sha256(pilot), "ids": len(listed)}
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps(["F1-change-PEP-1-2003-08-24"]), encoding="utf-8")
+    assert make_requests(toy, tmp_path / "one", "--items", str(one), "--runs", "2") == 0
+    assert [(k["id"], k["arm"], k["run"]) for k in lines(tmp_path / "one" / "keys.jsonl")] == [
+        ("F1-change-PEP-1-2003-08-24", "H+", 2), ("F1-change-PEP-1-2003-08-24", "H-", 2)]
+    unknown = tmp_path / "unknown.json"
+    unknown.write_text(json.dumps(["F1-change-PEP-1-2003-08-24", "not-an-item"]),
+                       encoding="utf-8")
+    assert make_requests(toy, tmp_path / "unknown", "--items", str(unknown)) == 2
+    assert not (tmp_path / "unknown").exists()
+
+
+def test_each_system_is_asked_exactly_what_the_scorer_counts(toy, questions):
+    every = [(q["id"], arm) for q in questions for arm in q["arms"]]
+    named = [(q["id"], arm) for q in questions for arm in q["arms"]
+             if q["family"] in ("F1", "F2", "CF")]
+    families = sorted({q["family"] for q in questions})
+    pilot = frozenset(json.loads((toy / "toy-data" / "pilot.json").read_text(
+        encoding="utf-8"))["ids"])
+    for system, expected in (("closed-book", every), ("oracle", every), ("grep-at-d", every),
+                             ("long-context", named)):
+        for items in (None, pilot):
+            planned = harness.plan_requests(questions, system, items, (1, 2, 3))
+            asked = [(q["id"], arm) for q, arm, run in planned if run == 1]
+            assert asked == [entry for entry in expected
+                             if items is None or entry[0] in items], (system, items)
+            assert [run for _, _, run in planned] == [1, 2, 3] * len(asked)
+            # The scorer's own denominators for the system, so that every request is an answer
+            # it counts and it counts no item that was not asked.
+            scope = scoring.Scope(tuple(families), items=items)
+            counted = scoring._denominators({q["id"]: q for q in questions}, scope, [system])
+            assert sorted(asked) == sorted((entry[0], arm) for arm, entries in
+                                           counted[system].items() for entry in entries)
+    # Long context is asked no F3, F4 or F5 item: the toy world's F4 and F5 are left out.
+    asked = {q["family"] for q, _, _ in harness.plan_requests(questions, "long-context", None,
+                                                              (1,))}
+    assert asked == {"F1", "CF"} and {"F4", "F5"} <= set(families)
+
+
+def test_requests_refuses_what_it_cannot_ask_and_writes_nothing(toy, tmp_path, capsys):
+    with pytest.raises(SystemExit) as caught:
+        make_requests(toy, tmp_path / "x", system="bm25")
+    assert caught.value.code == 2
+    for runs in ("1,1", "0", "4", "1,x", ""):
+        assert make_requests(toy, tmp_path / "x", "--runs", runs) == 2, runs
+    assert not (tmp_path / "x").exists()
+    # A run directory that holds anything already, and one inside the repository.
+    full = tmp_path / "full"
+    full.mkdir()
+    (full / "notes.txt").write_text("an earlier run's file\n", encoding="utf-8")
+    assert make_requests(toy, full) == 2
+    assert sorted(p.name for p in full.iterdir()) == ["notes.txt"]
+    inside = ROOT / "systems" / "tests" / "never-written-run"
+    assert make_requests(toy, inside) == 2 and not inside.exists()
+    # Questions that the build's manifest does not register.
+    data = tmp_path / "edited-data"
+    shutil.copytree(toy / "toy-data", data)
+    with open(data / "questions.jsonl", "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert harness.main(["requests", "--system", "closed-book", "--data", str(data),
+                         "--out-dir", str(tmp_path / "y")]) == 2
+    assert not (tmp_path / "y").exists()
+    assert "manifest" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("answer_type", "came", "row"), [
+    ("status", "Draft", "Draft"), ("status", " final. ", " final. "), ("status", 7, "7"),
+    ("status", -2, "-2"), ("status", True, True), ("status", ["Draft"], ["Draft"]),
+    ("status", None, None), ("status", 1.5, 1.5),
+    ("set", [1, "PEP 8"], [1, "PEP 8"]), ("set", "[1, \"PEP 8\"]", [1, "PEP 8"]),
+    ("set", " [] ", []), ("set", "1, 2", "1, 2"), ("set", "{\"a\": [1]}", "{\"a\": [1]}"),
+    ("set", "\"[1]\"", "\"[1]\""), ("set", 5, 5), ("set", None, None),
+    ("count", 5, 5), ("count", "5", 5), ("count", "-3", -3), ("count", "007", 7),
+    ("count", "+3", "+3"), ("count", " 3", " 3"), ("count", "3.0", "3.0"), ("count", "-", "-"),
+    ("count", "٣", "٣"), ("count", True, True), ("count", 3.0, 3.0),
+    ("count", [3], [3]), ("count", None, None), ("count", "9" * 5000, "9" * 5000),
+])
+def test_an_answer_is_shaped_by_its_type_and_nothing_else(answer_type, came, row):
+    shaped = harness.shape(answer_type, came)
+    assert shaped == row and type(shaped) is type(row)
+
+
+def test_rows_write_the_nine_fields_for_every_key_and_null_for_one_with_no_response(toy,
+                                                                                    tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = lines(run_dir / "keys.jsonl")
+    answered = {k["key"]: ("7" if n % 2 else 7) for n, k in enumerate(keys[:-2])}
+    answered[keys[0]["key"]] = None  # a refusal's null answer
+    respond(run_dir, answered)
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out) == 1  # written, with two keys that have no response
+    rows = lines(out)
+    assert len(rows) == len(keys)
+    for row, key in zip(rows, keys, strict=True):
+        assert list(row) == NINE
+        assert (row["id"], row["system"], row["arm"], row["run"]) == (
+            key["id"], "closed-book", key["arm"], key["run"])
+    # Every pilot item is an F1 or CF status item: 7 and "7" both become "7".
+    assert {row["answer"] for row in rows[1:-2]} == {"7"}
+    assert rows[0]["answer"] is None and rows[0]["tokens_in"] == 100
+    assert (rows[1]["tokens_in"], rows[1]["tokens_out"], rows[1]["wall_s"],
+            rows[1]["tool_calls"]) == (101, 5, 1.5, 0)
+    for row in rows[-2:]:
+        assert {name: row[name] for name in NINE[4:]} == dict.fromkeys(NINE[4:])
+
+
+def test_the_rows_score_as_an_outside_entry_on_the_toy_data(toy, questions, tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir) == 0
+    # One answer of each item's type, as a model might write it: a string for every type.
+    by_type = {"status": "Draft", "set": "[]", "count": "0"}
+    respond(run_dir, {k["key"]: by_type[k["answer_type"]] for k in lines(run_dir / "keys.jsonl")})
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out, system="closed-book-toy") == 0
+    # The toy world has items of all three types (F1 and CF status, F4 set, F5 count).
+    shaped = {"status": "Draft", "set": [], "count": 0}
+    keys = lines(run_dir / "keys.jsonl")
+    assert {k["answer_type"] for k in keys} == set(shaped)
+    for row, key in zip(lines(out), keys, strict=True):
+        expected = shaped[key["answer_type"]]
+        assert row["answer"] == expected and type(row["answer"]) is type(expected)
+        assert row["system"] == "closed-book-toy"
+    entries = tmp_path / "entries.json"
+    entries.write_text(json.dumps({"closed-book-toy": {}}), encoding="utf-8")
+    results = tmp_path / "results"
+    assert cli.main(["score", "--data", str(toy / "toy-data"), "--answers", str(out),
+                     "--entries", str(entries), "--out", str(results), "--answering-model",
+                     "toy-model", "--answering-settings", "toy settings",
+                     "--construction-model", "none", "--embedding-model", "none"]) == 0
+    report = json.loads((results / "results.json").read_text(encoding="utf-8"))
+    total = sum(len(q["arms"]) for q in questions) * 3
+    assert report["scope"]["outside_entries"] == ["closed-book-toy"]
+    assert (report["answers"]["rows"], report["answers"]["scored"]) == (total, total)
+    for listed in ("duplicate_count", "odd_run_count", "unasked_count", "out_of_scope_count"):
+        assert report["answers"][listed] == 0, listed
+    assert report["answers"]["missing_runs"] == [] and report["unknown_ids"] == []
+    assert report["accounting"]["closed-book-toy"]["without"] == 0
+    assert all(cell["answered"] == cell["asked"] for cell in report["coverage"])
+
+
+def test_the_hint_for_a_key_with_no_response_depends_on_how_the_run_stopped(toy, tmp_path,
+                                                                                capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    answers = dict.fromkeys(keys[:-3], "Draft")
+
+    def hint(*invocations: dict) -> str:
+        respond(run_dir, answers, invocations=list(invocations))
+        out = tmp_path / f"answers-{len(list(tmp_path.glob('answers-*')))}.jsonl"
+        assert make_rows(run_dir, out) == 1 and out.exists()
+        return capsys.readouterr().err
+
+    # An infrastructure stop (exit 2), a crash (4), or a kill that left no exit: the run resumes.
+    for invocation in ({"command": "answer", "exit": 2}, {"command": "answer", "exit": 4},
+                       {"command": "answer", "exit": None}):
+        said = hint(invocation)
+        assert "3 of the" in said and "resume it, then write the rows again" in said
+        assert "discard" not in said
+    # Five api_error responses in a row (exit 3): each response is its request's own, but the
+    # cause is the run's, so the run is discarded and run again in a fresh run directory, and a
+    # resume is not offered. Only the run's last invocation says how it stopped.
+    said = hint({"command": "answer", "exit": 2}, {"command": "answer", "exit": 3})
+    assert "3 of the" in said and "stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
+    assert "never resume it" in said
+
+
+def test_rows_say_to_discard_a_run_stopped_with_exit_3_even_when_every_key_has_a_response(
+        toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    # The fifth api_error response in a row fell on the run's last request: every key has a
+    # response, and the run's last invocation stopped with exit status 3. The rows are written,
+    # but the run is discarded all the same.
+    respond(run_dir, dict.fromkeys(keys, "Draft"),
+            invocations=[{"command": "answer", "exit": 3}])
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out) == 1 and len(lines(out)) == len(keys)
+    said = capsys.readouterr().err
+    assert "every key has a response, but the run stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
+    # With every key answered and a last invocation that did not stop so, rows says nothing.
+    respond(run_dir, dict.fromkeys(keys, "Draft"),
+            invocations=[{"command": "answer", "exit": 2}, {"command": "answer", "exit": 0}])
+    out.unlink()
+    assert make_rows(run_dir, out) == 0 and capsys.readouterr().err == ""
+
+
+def test_rows_refuses_responses_it_cannot_place(toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    out = tmp_path / "answers.jsonl"
+    # The reader has not run: no run.json in the output directory.
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    # A run.json that names no file of the output directory as the responses: a path, a name
+    # that is no file's, or none (asofbench_systems.answer.responses_name).
+    for name in ("../keys.jsonl", "sub/responses.jsonl", "/etc/passwd", "..", ".", "", None, 7):
+        respond(run_dir, dict.fromkeys(keys, "Draft"), responses=name)
+        capsys.readouterr()
+        assert make_rows(run_dir, out) == 2 and not out.exists(), name
+        assert "output/run.json names no responses file in output/" in capsys.readouterr().err
+    # Responses to another requests file.
+    respond(run_dir, dict.fromkeys(keys, "Draft"), requests_sha256="0" * 64)
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    # A response to a key that the run did not ask, and two responses to one key.
+    respond(run_dir, {**dict.fromkeys(keys, "Draft"), str(uuid.uuid4()): "Draft"})
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    respond(run_dir, dict.fromkeys(keys, "Draft"))
+    with open(run_dir / "output" / "responses.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"key": keys[0], "answer": "Final", "tokens_in": 1,
+                                 "tokens_out": 1, "wall_s": 1.0, "tool_calls": 0, "error": None,
+                                 "thinking_blocks": 0}) + "\n")
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    # Another registered system's name, an edited keys file, and an answers file already there.
+    respond(run_dir, dict.fromkeys(keys, "Draft"))
+    assert make_rows(run_dir, out, system="long-context") == 2 and not out.exists()
+    keys_file = run_dir / "keys.jsonl"
+    original = keys_file.read_bytes()
+    keys_file.write_bytes(original.replace(b'"run": 1', b'"run": 3', 1))
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    keys_file.write_bytes(original)
+    assert make_rows(run_dir, out) == 0
+    assert make_rows(run_dir, out) == 2
+
+
+def test_an_interrupted_requests_leaves_no_requests_file_for_a_container_to_answer(toy, tmp_path,
+                                                                                    monkeypatch):
+    def interrupted(*args, **kwargs):
+        raise OSError("the disk filled")
+
+    real_uuid4, real_dumps, real_replace = uuid.uuid4, json.dumps, os.replace
+    drawn, dumped, renamed = [], [], []
+
+    def uuid4_until_the_sixth():
+        drawn.append(1)
+        if len(drawn) > 5:
+            raise OSError("the disk filled")
+        return real_uuid4()
+
+    def dumps_until_the_sixth_request(value, *args, **kwargs):
+        # A request line is the only dict with a question in it: the keys' lines and the plan hold
+        # none.
+        if isinstance(value, dict) and "question" in value:
+            dumped.append(1)
+            if len(dumped) > 5:
+                raise OSError("the disk filled")
+        return real_dumps(value, *args, **kwargs)
+
+    def replace_the_keys_but_not_the_requests(source, destination):
+        # The plan's own atomic write renames too: only the two files' names count.
+        if Path(destination).name in ("keys.jsonl", "requests.jsonl"):
+            renamed.append(Path(destination).name)
+            if len(renamed) > 1:
+                raise OSError("the disk failed")
+        return real_replace(source, destination)
+
+    # Interrupted while the keys are drawn, before either file is opened; while the request lines
+    # are written, with five of them in the file already; while the plan is written, which comes
+    # before either file has its name; and between the two renames, of which the keys' is first.
+    monkeypatch.setattr(harness.uuid, "uuid4", uuid4_until_the_sixth)
+    assert make_requests(toy, tmp_path / "keys") == 4
+    monkeypatch.setattr(harness.uuid, "uuid4", real_uuid4)
+    monkeypatch.setattr(json, "dumps", dumps_until_the_sixth_request)
+    assert make_requests(toy, tmp_path / "lines") == 4
+    monkeypatch.setattr(json, "dumps", real_dumps)
+    monkeypatch.setattr(harness, "write_json", interrupted)
+    assert make_requests(toy, tmp_path / "plan") == 4
+    monkeypatch.undo()
+    monkeypatch.setattr(os, "replace", replace_the_keys_but_not_the_requests)
+    assert make_requests(toy, tmp_path / "renames") == 4
+    monkeypatch.undo()
+    # The five lines that were written are in the file under its temporary name, which is no
+    # requests file.
+    pending = harness.temporary_path(tmp_path / "lines" / "input" / "requests.jsonl")
+    assert pending.read_bytes().count(b"\n") == 5
+    for name in ("keys", "lines", "plan", "renames"):
+        run_dir = tmp_path / name
+        assert not (run_dir / "input" / "requests.jsonl").exists()
+        # The reader finds no requests file there.
+        with pytest.raises(answer_requests.Refused, match="is not a file"):
+            answer_requests.scan_requests(run_dir / "input" / "requests.jsonl")
+    for name in ("keys", "lines", "plan"):
+        assert not (tmp_path / name / "keys.jsonl").exists()
+        assert not (tmp_path / name / "plan.json").exists()
+    # Between the renames the keys, which go first, are in place and the requests are not.
+    assert (tmp_path / "renames" / "keys.jsonl").exists()
+    assert (tmp_path / "renames" / "plan.json").exists()
+    # And the harness refuses each directory again.
+    for name in ("keys", "lines", "plan", "renames"):
+        assert make_requests(toy, tmp_path / name) == 2, name
+
+
+def test_an_input_that_cannot_be_read_is_refused_with_exit_status_2(toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    respond(run_dir, dict.fromkeys(keys, "Draft"))
+    out = tmp_path / "answers.jsonl"
+    # The keys file gone, and an answers file in a directory that does not exist.
+    kept = (run_dir / "keys.jsonl").read_bytes()
+    (run_dir / "keys.jsonl").unlink()
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    assert "keys.jsonl cannot be read (No such file or directory)" in capsys.readouterr().err
+    (run_dir / "keys.jsonl").write_bytes(kept)
+    assert make_rows(run_dir, tmp_path / "missing" / "answers.jsonl") == 2
+    # Files that the user cannot read: the responses, and the questions.
+    if os.geteuid() != 0:  # root reads a file whatever its mode
+        (run_dir / "output" / "responses.jsonl").chmod(0)
+        assert make_rows(run_dir, out) == 2 and not out.exists()
+        assert "responses.jsonl cannot be read (Permission denied)" in capsys.readouterr().err
+        data = tmp_path / "unreadable-data"
+        shutil.copytree(toy / "toy-data", data)
+        (data / "questions.jsonl").chmod(0)
+        assert harness.main(["requests", "--system", "closed-book", "--data", str(data),
+                             "--out-dir", str(tmp_path / "never")]) == 2
+        assert not (tmp_path / "never").exists()
+
+
+def test_an_error_that_no_rule_expects_exits_4_and_never_1(toy, tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    respond(run_dir, {k["key"]: "Draft" for k in lines(run_dir / "keys.jsonl")})
+
+    def broken(answer_type, value):
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(harness, "shape", broken)
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out) == 4 and not out.exists()
+    assert "crashed (exit 4)" in capsys.readouterr().err
+
+
+# --- every entrant's requests: the streams they read, and their order --------------------------
+# Long context and the oracle read the toy world's three streams, which its manifest registers
+# (the `world` fixture); closed book reads none.
+
+
+def make_streamed_requests(world: Path, out: Path, system: str, *extra: str) -> int:
+    """`requests` on the toy world with its streams registered: long context and the oracle are
+    given the streams' directory, closed book none."""
+    streams = [] if system == "closed-book" else ["--streams-dir", str(world / "streams")]
+    return make_requests(world, out, *streams, *extra, system=system)
+
+
+def test_plan_json_names_the_streams_a_run_read_and_closed_book_reads_none(world, tmp_path):
+    for system, arms in (("long-context", ["CF", "H+", "H-"]), ("oracle", ["CF", "H+"])):
+        assert make_streamed_requests(world, tmp_path / system, system) == 0
+        plan = json.loads((tmp_path / system / "plan.json").read_text(encoding="utf-8"))
+        assert plan["system"] == system
+        assert plan["streams"] == {arm: {"file": STREAM_FILES[arm],
+                                         "sha256": sha256(world / "streams" / STREAM_FILES[arm])}
+                                   for arm in arms}
+        assert str(tmp_path) not in json.dumps(plan) and str(ROOT) not in json.dumps(plan)
+        assert plan["requests_sha256"] == sha256(tmp_path / system / "input" / "requests.jsonl")
+        assert plan["keys_sha256"] == sha256(tmp_path / system / "keys.jsonl")
+        assert sorted(p.name for p in (tmp_path / system).iterdir()) == [
+            "input", "keys.jsonl", "output", "plan.json"]
+        assert sorted(p.name for p in (tmp_path / system / "input").iterdir()) == [
+            "requests.jsonl"]
+    # Only the streams the asked items need are read: one counterfactual item reads cf.jsonl.
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps(["CF-counterfactual-PEP-1-2013-09-02"]), encoding="utf-8")
+    assert make_streamed_requests(world, tmp_path / "cf-only", "oracle", "--items", str(one),
+                                  "--runs", "2") == 0
+    plan = json.loads((tmp_path / "cf-only" / "plan.json").read_text(encoding="utf-8"))
+    assert list(plan["streams"]) == ["CF"] and plan["requests"] == 1
+    assert make_streamed_requests(world, tmp_path / "closed", "closed-book") == 0
+    plan = json.loads((tmp_path / "closed" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["streams"] is None
+
+
+@pytest.mark.parametrize("system", ["closed-book", "long-context", "oracle"])
+def test_every_entrant_s_requests_are_written_in_ascending_key_order(system, world, tmp_path):
+    assert make_streamed_requests(world, tmp_path / "run", system) == 0
+    requests = lines(tmp_path / "run" / "input" / "requests.jsonl")
+    keys = lines(tmp_path / "run" / "keys.jsonl")
+    assert [r["key"] for r in requests] == sorted(r["key"] for r in requests)
+    assert sorted(r["key"] for r in requests) == sorted(k["key"] for k in keys)
+    # keys.jsonl keeps the items' order, so the requests are not in it: a random permutation.
+    assert [r["key"] for r in requests] != [k["key"] for k in keys]
+    planned = harness.plan_requests(lines(world / "toy-data" / "questions.jsonl"), system, None,
+                                    (1, 2, 3))
+    assert [(k["id"], k["arm"], k["run"]) for k in keys] == [
+        (q["id"], arm, run) for q, arm, run in planned]
+    # Each request holds the fields of its entrant and a UUID4 key, in canonical form.
+    for request in requests:
+        assert set(request) == ({"key", "question"} if system == "closed-book"
+                                else {"key", "question", "context"})
+        assert str(uuid.UUID(request["key"], version=4)) == request["key"]
+
+
+def test_the_requests_follow_the_keys_and_not_the_items(world, tmp_path, monkeypatch):
+    counter = itertools.count()
+
+    def descending() -> uuid.UUID:
+        return uuid.UUID(int=(0xFFFF_FFFF - next(counter)) << 96, version=4)
+
+    monkeypatch.setattr(harness.uuid, "uuid4", descending)
+    assert make_streamed_requests(world, tmp_path / "run", "oracle") == 0
+    requests = lines(tmp_path / "run" / "input" / "requests.jsonl")
+    keys = lines(tmp_path / "run" / "keys.jsonl")
+    # The first item's keys are the largest, so the file ends with them and holds the last item's
+    # first.
+    assert [r["key"] for r in requests] == [k["key"] for k in reversed(keys)]
+
+
+# --- grep at D: one requests file per arm and date ------------------------------------------------
+# Grep at D reads its arm's tree as of the end of each item's date, which run_dates.py builds for
+# one date at a time, so its requests are written one file per arm and date, each in a directory
+# of its own that is mounted alone, with dates.json mapping each file to its arm and date.
+
+
+def file_name(arm: str, as_of: str) -> str:
+    return f"{STREAM_FILES[arm].removesuffix('.jsonl')}-{as_of}"
+
+
+def test_grep_at_d_s_requests_are_one_file_per_arm_and_date(toy, questions, tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    keys = lines(run_dir / "keys.jsonl")
+    assert [(k["id"], k["arm"], k["run"]) for k in keys] == [
+        (q["id"], arm, run) for q in questions for arm in q["arms"] for run in (1, 2, 3)]
+    by_id, by_key = {q["id"]: q for q in questions}, {k["key"]: k for k in keys}
+    expected = sorted({file_name(arm, q["as_of"]) for q in questions for arm in q["arms"]})
+    assert sorted(p.name for p in (run_dir / "input").iterdir()) == expected
+    assert sorted(p.name for p in (run_dir / "output").iterdir()) == expected
+    assert sorted(p.name for p in run_dir.iterdir()) == ["dates.json", "input", "keys.jsonl",
+                                                         "output", "plan.json"]
+    dates = json.loads((run_dir / "dates.json").read_text(encoding="utf-8"))
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    assert list(dates) == expected and list(plan["files"]) == expected
+    seen = []
+    for name in expected:
+        assert sorted(p.name for p in (run_dir / "input" / name).iterdir()) == ["requests.jsonl"]
+        assert list((run_dir / "output" / name).iterdir()) == []
+        path = run_dir / "input" / name / "requests.jsonl"
+        requests = lines(path)
+        # The file's requests are its arm's and date's, each with a key and the question alone, in
+        # ascending key order, and the reader accepts the file.
+        assert [r["key"] for r in requests] == sorted(r["key"] for r in requests)
+        for request in requests:
+            key = by_key[request["key"]]
+            assert dates[name] == {"arm": key["arm"], "as_of": by_id[key["id"]]["as_of"]}
+            assert request == {"key": key["key"], "question": by_id[key["id"]]["question"]}
+        assert answer_requests.scan_requests(path) == [r["key"] for r in requests]
+        assert plan["files"][name] == {"requests": len(requests), "requests_sha256": sha256(path)}
+        seen += [r["key"] for r in requests]
+    # Every key is in exactly one file.
+    assert sorted(seen) == sorted(by_key) and len(set(seen)) == len(seen)
+    # dates.json holds each file's arm and date and nothing of the items.
+    text = (run_dir / "dates.json").read_text(encoding="utf-8")
+    assert all(set(entry) == {"arm", "as_of"} for entry in dates.values())
+    for q in questions:
+        assert q["id"] not in text
+    assert plan["system"] == "grep-at-d" and plan["requests_sha256"] is None
+    assert plan["requests"] == len(keys) and plan["streams"] is None
+    assert plan["keys_sha256"] == sha256(run_dir / "keys.jsonl")
+    assert plan["dates_sha256"] == sha256(run_dir / "dates.json")
+    assert str(tmp_path) not in json.dumps(plan) and str(ROOT) not in json.dumps(plan)
+
+
+def test_grep_at_d_reads_no_stream_and_its_items_and_runs_limit_its_files(toy, questions,
+                                                                         tmp_path):
+    assert make_requests(toy, tmp_path / "streamed", "--streams-dir", str(tmp_path),
+                         system="grep-at-d") == 2
+    assert not (tmp_path / "streamed").exists()
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps(["F1-change-PEP-1-2003-08-24", "CF-counterfactual-PEP-1-2013-09-02"]),
+                   encoding="utf-8")
+    assert make_requests(toy, tmp_path / "two", "--items", str(one), "--runs", "1,3",
+                         system="grep-at-d") == 0
+    dates = json.loads((tmp_path / "two" / "dates.json").read_text(encoding="utf-8"))
+    assert dates == {"cf-2013-09-02": {"arm": "CF", "as_of": "2013-09-02"},
+                     "h-minus-2003-08-24": {"arm": "H-", "as_of": "2003-08-24"},
+                     "h-plus-2003-08-24": {"arm": "H+", "as_of": "2003-08-24"}}
+    for name in dates:
+        assert len(lines(tmp_path / "two" / "input" / name / "requests.jsonl")) == 2
+
+
+def test_an_interrupted_grep_at_d_requests_leaves_no_dates_json(toy, tmp_path, monkeypatch):
+    real_replace, renamed = os.replace, []
+
+    def replace_two_files_then_fail(source, destination):
+        if Path(destination).name == "requests.jsonl":
+            renamed.append(destination)
+            if len(renamed) > 2:
+                raise OSError("the disk failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace_two_files_then_fail)
+    assert make_requests(toy, tmp_path / "run", system="grep-at-d") == 4
+    monkeypatch.undo()
+    # Some files have their names, but the run directory has no dates.json, which run_dates.py
+    # reads first: it is written last, after every requests file is in place.
+    assert len(renamed) == 3 and not (tmp_path / "run" / "dates.json").exists()
+    assert make_requests(toy, tmp_path / "run", system="grep-at-d") == 2
+
+
+def respond_dated(run_dir: Path, value_for, skip=(), invocations=None) -> None:
+    """Writes what grep at D's runs would have written in each date's output directory but those
+    of ``skip``: a run.json and one response per key of the date's file."""
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    for name, entry in plan["files"].items():
+        if name in skip:
+            continue
+        output = run_dir / "output" / name
+        (output / "run.json").write_text(json.dumps({
+            "requests": "requests.jsonl", "requests_sha256": entry["requests_sha256"],
+            "responses": "responses.jsonl", "model": "claude-haiku-5-5",
+            "invocations": (invocations or {}).get(name, [{"command": "answer", "exit": 0}])}),
+            encoding="utf-8")
+        keys = [r["key"] for r in lines(run_dir / "input" / name / "requests.jsonl")]
+        with open(output / "responses.jsonl", "w", encoding="utf-8") as handle:
+            for key in keys:
+                handle.write(json.dumps({"key": key, "answer": value_for(key), "tokens_in": 120,
+                                         "tokens_out": 9, "wall_s": 4.5, "tool_calls": 3,
+                                         "error": None, "thinking_blocks": 2}) + "\n")
+
+
+def test_grep_at_d_s_rows_gather_every_date_s_responses_and_score(toy, questions, tmp_path,
+                                                                   capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    keys = lines(run_dir / "keys.jsonl")
+    by_type = {"status": "Draft", "set": "[]", "count": "0"}
+    type_of = {k["key"]: k["answer_type"] for k in keys}
+    dates = json.loads((run_dir / "dates.json").read_text(encoding="utf-8"))
+    left = sorted(dates)[0]
+    respond_dated(run_dir, lambda key: by_type[type_of[key]], skip=(left,))
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out, system="grep-at-d-toy") == 1
+    said = capsys.readouterr().err
+    assert "run_dates.py" in said and "discard" not in said
+    unanswered = {r["key"] for r in lines(run_dir / "input" / left / "requests.jsonl")}
+    rows = lines(out)
+    assert len(rows) == len(keys)
+    for row, key in zip(rows, keys, strict=True):
+        assert list(row) == NINE
+        if key["key"] in unanswered:
+            assert {name: row[name] for name in NINE[4:]} == dict.fromkeys(NINE[4:])
+        else:
+            assert (row["tokens_in"], row["tool_calls"]) == (120, 3)
+    # Once every date has answered, the rows are whole and score as an outside entry.
+    respond_dated(run_dir, lambda key: by_type[type_of[key]])
+    out.unlink()
+    assert make_rows(run_dir, out, system="grep-at-d-toy") == 0
+    shaped = {"status": "Draft", "set": [], "count": 0}
+    for row, key in zip(lines(out), keys, strict=True):
+        assert row["answer"] == shaped[key["answer_type"]] and row["system"] == "grep-at-d-toy"
+    entries = tmp_path / "entries.json"
+    entries.write_text(json.dumps({"grep-at-d-toy": {}}), encoding="utf-8")
+    results = tmp_path / "results"
+    assert cli.main(["score", "--data", str(toy / "toy-data"), "--answers", str(out),
+                     "--entries", str(entries), "--out", str(results), "--answering-model",
+                     "toy-model", "--answering-settings", "toy settings",
+                     "--construction-model", "none", "--embedding-model", "none"]) == 0
+    report = json.loads((results / "results.json").read_text(encoding="utf-8"))
+    total = sum(len(q["arms"]) for q in questions) * 3
+    assert (report["answers"]["rows"], report["answers"]["scored"]) == (total, total)
+    assert all(cell["answered"] == cell["asked"] for cell in report["coverage"])
+
+
+def test_grep_at_d_s_hint_after_a_date_stopped_by_api_errors_is_to_discard_the_run(toy,
+                                                                                  tmp_path,
+                                                                                  capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    dates = sorted(json.loads((run_dir / "dates.json").read_text(encoding="utf-8")))
+    stopped = {dates[1]: [{"command": "answer", "exit": 3}]}
+    respond_dated(run_dir, lambda key: "Draft", skip=(dates[0], dates[1]), invocations=stopped)
+    output = run_dir / "output" / dates[1]
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    (output / "run.json").write_text(json.dumps({
+        "requests": "requests.jsonl", "requests_sha256": plan["files"][dates[1]]["requests_sha256"],
+        "responses": "responses.jsonl", "model": "claude-haiku-5-5",
+        "invocations": stopped[dates[1]]}), encoding="utf-8")
+    (output / "responses.jsonl").write_text("", encoding="utf-8")
+    assert make_rows(run_dir, tmp_path / "answers.jsonl", system="grep-at-d") == 1
+    said = capsys.readouterr().err
+    assert f"{dates[1]} stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+
+
+def test_grep_at_d_s_rows_say_to_discard_the_run_after_a_stop_with_exit_3_with_every_key_answered(
+        toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    dates = sorted(json.loads((run_dir / "dates.json").read_text(encoding="utf-8")))
+    # The fifth api_error response in a row fell on the last date's last request: every date has
+    # run and every key has a response, but the last date's run stopped with exit status 3, so
+    # the whole run is discarded.
+    respond_dated(run_dir, lambda key: "Draft",
+                  invocations={dates[-1]: [{"command": "answer", "exit": 3}]})
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out, system="grep-at-d") == 1
+    assert len(lines(out)) == len(lines(run_dir / "keys.jsonl"))
+    said = capsys.readouterr().err
+    assert f"every key has a response, but {dates[-1]} stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
+
+
+def test_grep_at_d_s_rows_refuse_responses_they_cannot_place(toy, tmp_path):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, system="grep-at-d") == 0
+    out = tmp_path / "answers.jsonl"
+
+    def make_rows(run_dir: Path, out: Path) -> int:
+        return harness.main(["rows", "--system", "grep-at-d", "--run-dir", str(run_dir), "--out",
+                             str(out)])
+
+    dates = sorted(json.loads((run_dir / "dates.json").read_text(encoding="utf-8")))
+    # Nothing answered at all.
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    respond_dated(run_dir, lambda key: "Draft")
+    assert make_rows(run_dir, out) == 0
+    out.unlink()
+    # A date's run that answered another requests file.
+    record_path = run_dir / "output" / dates[0] / "run.json"
+    kept = record_path.read_text(encoding="utf-8")
+    record_path.write_text(kept.replace(json.loads(kept)["requests_sha256"], "0" * 64),
+                           encoding="utf-8")
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    record_path.write_text(kept, encoding="utf-8")
+    # A date's requests file that is no longer the one plan.json records.
+    path = run_dir / "input" / dates[0] / "requests.jsonl"
+    original = path.read_bytes()
+    path.write_bytes(original + b"\n")
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    path.write_bytes(original)
+    # A response, in one date's output, to a key of another date's file.
+    responses = run_dir / "output" / dates[0] / "responses.jsonl"
+    other = lines(run_dir / "input" / dates[1] / "requests.jsonl")[0]["key"]
+    answered = responses.read_text(encoding="utf-8")
+    first = json.loads(answered.splitlines()[0])
+    responses.write_text(answered + json.dumps({**first, "key": other}) + "\n", encoding="utf-8")
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    responses.write_text(answered, encoding="utf-8")
+    # dates.json changed after plan.json recorded it.
+    dates_path = run_dir / "dates.json"
+    dates_path.write_text(dates_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert make_rows(run_dir, out) == 2 and not out.exists()

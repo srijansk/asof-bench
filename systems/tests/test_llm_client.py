@@ -7,10 +7,13 @@ which skips the ones that need graphiti-core:
     uv run --frozen --extra dev --with anthropic==0.111.0 --with httpx==0.28.1 \\
         python -m pytest systems/tests/test_llm_client.py
 
-and all of them run inside the Graphiti image, with no network at all:
+and again with those that the reader image's lock pins, beside test_answer.py (its docstring has
+the command), since the reader builds the same client with that SDK; and all of them run inside
+the Graphiti image, with no network at all, the tree mounted below /checkout as for the image's
+other tests (systems/graphiti/README.md):
 
-    docker run --rm --network none -v "$PWD/systems:/systems:ro" asofbench/graphiti \\
-        python -m pytest -p no:cacheprovider /systems/tests/test_llm_client.py
+    docker run --rm --network none -v "$PWD/systems:/checkout/systems:ro" asofbench/graphiti \\
+        python -m pytest -p no:cacheprovider /checkout/systems/tests/test_llm_client.py
 
 Every request goes to an httpx MockTransport or to a stand-in proxy on 127.0.0.1, and the key is
 a made-up one, so no test reaches the API or holds a real key.

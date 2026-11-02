@@ -24,10 +24,10 @@ What a system may see is fixed by sections 8 and 11 of the registration ([sectio
 
 ```bash
 uv run asofbench materialize --stream streams/h-minus.jsonl --as-of 2021-09-03 --arm H- --data data/v0.1 \
-    --out ../asofbench-trees/h-minus-2021-09-03
+    --out /tmp/asofbench-trees/tree-1
 ```
 
-This writes the proposal files as they stood at the end of 2021-09-03 (UTC), rebuilt from the arm's episodes and nothing else, so the tree holds no header its arm withholds and no index such as PEP 0. Each present proposal is written as `<repo>/<series>-<number>`, with the episode's repository, that repository's series in lower case and a PEP's number in four digits, such as `peps/pep-0008`, `EIPs/eip-1559` or `ERCs/erc-20`; an ERC is `EIPs/eip-<number>` until the episode that renames it into the ERC repository.
+This writes the proposal files as they stood at the end of 2021-09-03 (UTC), rebuilt from the arm's episodes and nothing else, so the tree holds no header its arm withholds and no index such as PEP 0, into a directory whose path names no arm, date or user, since a sandbox that mounts the tree can read its whole host path in its mount table. Each present proposal is written as `<repo>/<series>-<number>`, with the episode's repository, that repository's series in lower case and a PEP's number in four digits, such as `peps/pep-0008`, `EIPs/eip-1559` or `ERCs/erc-20`; an ERC is `EIPs/eip-<number>` until the episode that renames it into the ERC repository.
 
 Beside the files it writes `git-log.txt`, the log of the commits up to the date, taken from the same stream ([section 8](../PREREGISTRATION.md#8-arms-and-the-dated-revision-stream)): one entry per commit that gives the stream an episode recorded by the end of the date, newest first, with the commit id, its recorded time (the episodes' `recorded_at`, in UTC), the path of each proposal file it touched, under the name the tree gives the file, or gave it before a delete (a rename into the ERC repository is listed under its new name, `ERCs/erc-<number>`, only, and a rename within a repository keeps the file's name), and its message exactly as the arm's stream keeps it, each line after four spaces. It holds no diff and no text. For this example the command prints `946 files as of the end of 2021-09-03 (UTC), and git-log.txt with the 9633 commits up to it`, and the 2.1 MB log holds entries such as this one, a commit that changed only withheld header lines (PEP 643's Status and Resolution), so that its H- episode has an empty diff:
 

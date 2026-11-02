@@ -24,7 +24,7 @@ It uses only the standard library.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 # The section line of each kind that has a text, and what an empty diff renders as.
 SECTIONS = {
@@ -38,18 +38,26 @@ KINDS = (*SECTIONS, "delete")
 
 
 def read_episodes(path: str) -> Iterator[dict]:
-    """The episodes of the stream file at ``path``, one JSON object per line, in file order. A
-    line ends at a newline only, so a line or paragraph separator inside a string stays in it;
-    ValueError for a line that is not a JSON object."""
+    """The episodes of the stream file at ``path``, one JSON object per line, in file order: the
+    episodes of its lines (``episodes_of``), which name ``path`` in a ValueError."""
     with open(path, "rb") as handle:
-        for number, raw in enumerate(handle, 1):
-            try:
-                episode = json.loads(raw.decode("utf-8"))
-            except ValueError as error:
-                raise ValueError(f"{path}: line {number} is not JSON: {error}") from None
-            if not isinstance(episode, dict):
-                raise ValueError(f"{path}: line {number} is not a JSON object")
-            yield episode
+        yield from episodes_of(handle, path)
+
+
+def episodes_of(lines: Iterable[bytes], where: str) -> Iterator[dict]:
+    """The episodes of a stream's ``lines``, each a line of bytes as a binary file gives it, one
+    JSON object per line, in order. A line ends at a newline only, so a line or paragraph
+    separator inside a string stays in it; ValueError, naming the stream ``where``, for a line that
+    is not a JSON object. A reader that must know the bytes it parsed, to hash them as it goes,
+    passes its own lines."""
+    for number, raw in enumerate(lines, 1):
+        try:
+            episode = json.loads(raw.decode("utf-8"))
+        except ValueError as error:
+            raise ValueError(f"{where}: line {number} is not JSON: {error}") from None
+        if not isinstance(episode, dict):
+            raise ValueError(f"{where}: line {number} is not a JSON object")
+        yield episode
 
 
 def render_episode(e: dict) -> str:

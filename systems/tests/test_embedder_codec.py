@@ -166,6 +166,27 @@ def test_the_self_test_wants_unit_vectors_that_differ_by_prompt():
     assert any("norm" in problem for problem in server.check_model(FakeEncoder()))
 
 
+def test_the_self_test_allows_the_norm_that_bfloat16_rounding_leaves_and_no_more():
+    """The model computes in bfloat16, so its Normalize module rounds a vector's norm and each
+    component to bfloat16, which leaves the norm within 2^-7 of 1; a norm further off fails."""
+    def scaled(scale: float):
+        def encode(texts: list[str], prompt_name: str) -> tuple[list[list[float]], int]:
+            k = 0 if prompt_name == "query" else 1
+            return [[scale if j == k else 0.0 for j in range(2048)] for _ in texts], 3
+
+        return encode
+
+    assert server.NORM_TOLERANCE == 2 ** -7
+    for scale in (1 - 2 ** -8, 1 + 2 ** -8, 1 - 2 ** -7, 1 + 2 ** -7):
+        assert server.check_model(scaled(scale)) == [], scale
+    for scale in (1 - 2 ** -6, 1 + 2 ** -6, 1.05):
+        assert any("norm" in problem for problem in server.check_model(scaled(scale))), scale
+
+
+def test_the_server_names_bfloat16_weights_and_float32_vectors():
+    assert (server.WEIGHTS_DTYPE, server.VECTOR_DTYPE) == ("bfloat16", "float32")
+
+
 def test_the_request_handling_loads_no_model_library():
     assert not {"torch", "transformers", "sentence_transformers"} & set(sys.modules)
 

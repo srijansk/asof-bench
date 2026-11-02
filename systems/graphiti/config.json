@@ -46,13 +46,15 @@
     "query_model": "voyage-4-nano-query",
     "use": "voyage-4-nano-document (the model's document prompt) for every text Graphiti embeds while ingesting, the stored texts and the name searches it makes to deduplicate them; the answering path builds a second embedder with voyage-4-nano-query (the query prompt) for questions",
     "dimensions_parameter": "not sent: OpenAIEmbedder asks for the model's own 2048 dimensions and keeps the first embedding_dim (2048) of them",
-    "server": "env/embedder (asofbench/embedder): voyage-4-nano on the CPU in float32 behind an OpenAI-compatible endpoint",
+    "server": "env/embedder (asofbench/embedder): voyage-4-nano on the CPU in bfloat16, the dtype its weights are published in, behind an OpenAI-compatible endpoint, returning each vector in float32",
     "model": {
       "id": "voyageai/voyage-4-nano",
       "revision": "5fb34e870f49f19e79c94d5e118f5ee730133279",
       "weights": "model.safetensors",
       "weights_sha256": "3dae0c63c81dcab79ac213af331940a1bf2b8a53ec8646be878552890291ad30",
       "weights_bytes": 692919112,
+      "weights_dtype": "bfloat16: the model runs in the dtype of its published weights (its config.json's torch_dtype), loaded with dtype=torch.bfloat16; the server refuses to start, and the image's build fails, unless every weight is bfloat16",
+      "vector_dtype": "float32: each vector is converted to float32, which holds its bfloat16 values exactly, before it is checked and served",
       "dimensions": 2048,
       "prompts": {
         "query": "Represent the query for retrieving supporting documents: ",

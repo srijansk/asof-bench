@@ -13,9 +13,11 @@ strings, and refuses token arrays, empty texts and any ``dimensions`` but 2048.
 
 The model is loaded once, at start, from the snapshot that the image's build downloaded and
 checked (fetch_model.py), with the network off (``HF_HUB_OFFLINE`` and ``TRANSFORMERS_OFFLINE``),
-on the CPU in float32; the vectors are the model's own, normalised by its Normalize module. One
-lock serialises the requests, since one model runs on the CPU. ``usage`` counts the tokens the
-model reads: each text with its prompt, as the model's tokenizer splits them.
+on the CPU in bfloat16, the dtype its weights are published in (its config.json's
+``torch_dtype``); the vectors are the model's own, normalised by its Normalize module, and each is
+converted to float32, which holds every bfloat16 value exactly, before it is checked or
+serialised. One lock serialises the requests, since one model runs on the CPU. ``usage`` counts
+the tokens the model reads: each text with its prompt, as the model's tokenizer splits them.
 
 The request handling imports only the standard library: torch, transformers and
 sentence-transformers are imported only where the model is loaded and run.
@@ -54,8 +56,12 @@ ENCODINGS = ("float", "base64")
 ROUTES = {"/v1/embeddings": "POST", "/v1/models": "GET", "/health": "GET"}
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8080
-# How far from 1 the norm of a vector may be in the self-test (float32 rounding is far smaller).
-NORM_TOLERANCE = 1e-5
+# The dtype the model runs in, that of its published weights, and the dtype of the vectors served.
+WEIGHTS_DTYPE, VECTOR_DTYPE = "bfloat16", "float32"
+# How far from 1 the norm of a vector may be in the self-test. The Normalize module divides in
+# bfloat16, which rounds the norm it divides by and then each quotient to 8 significant bits, a
+# relative error of at most 2^-8 each, so the norm of a vector it returns is within 2^-7 of 1.
+NORM_TOLERANCE = 2 ** -7
 SELF_TEST_TEXT = "toy text"
 
 # An encoder takes the texts and a prompt name, and returns one vector per text and the number of
@@ -160,16 +166,18 @@ def check_model(encode: Encoder) -> list[str]:
 
 
 def load_encoder(model_dir: str = MODEL_DIR) -> Encoder:
-    """voyage-4-nano from its local snapshot, loaded offline on the CPU in float32 and checked to
-    be the registered pipeline, as an encoder that serialises its calls through one lock."""
+    """voyage-4-nano from its local snapshot, loaded offline on the CPU in bfloat16 and checked to
+    be the registered pipeline, as an encoder that returns float32 vectors and serialises its
+    calls through one lock."""
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     import torch
     from sentence_transformers import SentenceTransformer
     from sentence_transformers.sentence_transformer.modules import Normalize
 
+    weights, vector = getattr(torch, WEIGHTS_DTYPE), getattr(torch, VECTOR_DTYPE)
     model = SentenceTransformer(model_dir, trust_remote_code=True, device="cpu",
-                                model_kwargs={"torch_dtype": torch.float32})
+                                model_kwargs={"dtype": weights})
     problems = [f"the model's {name} prompt is {model.prompts.get(name)!r}, not {prompt!r}"
                 for name, prompt in PROMPTS.items() if model.prompts.get(name) != prompt]
     if model.get_embedding_dimension() != DIMENSIONS:
@@ -177,8 +185,9 @@ def load_encoder(model_dir: str = MODEL_DIR) -> Encoder:
     if not isinstance(model[-1], Normalize):
         problems.append(f"the model's last module is {type(model[-1]).__name__}, not Normalize")
     dtypes = {parameter.dtype for parameter in model.parameters()}
-    if dtypes != {torch.float32}:
-        problems.append(f"the model's weights are {sorted(map(str, dtypes))}, not float32")
+    if dtypes != {weights}:
+        problems.append(f"the model's weights are {sorted(map(str, dtypes))}, not "
+                        f"{WEIGHTS_DTYPE}")
     if problems:
         raise RuntimeError("; ".join(problems))
     lock = threading.Lock()
@@ -188,9 +197,10 @@ def load_encoder(model_dir: str = MODEL_DIR) -> Encoder:
             # The model's own preprocessing, with the prompt as encode applies it, so that the
             # count is of the tokens the model reads.
             features = model.preprocess(texts, prompt=model.prompts[prompt_name])
-            vectors = model.encode(texts, prompt_name=prompt_name, convert_to_numpy=True,
+            vectors = model.encode(texts, prompt_name=prompt_name, convert_to_tensor=True,
                                    show_progress_bar=False)
-        return vectors.tolist(), int(features["attention_mask"].sum())
+        # Each vector in float32, which holds the bfloat16 values the model gave exactly.
+        return vectors.to(vector).tolist(), int(features["attention_mask"].sum())
 
     return encode
 
@@ -263,8 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serves voyage-4-nano through an "
                                                  "OpenAI-compatible endpoint on port 8080.")
     parser.add_argument("--self-test", action="store_true",
-                        help="load the model, check the vectors it gives one text under each "
-                             "prompt, and exit")
+                        help="load the model, check its weights' dtype and the vectors it gives "
+                             "one text under each prompt, and exit")
     args = parser.parse_args(argv)
     encode = load_encoder()
     if args.self_test:
@@ -272,15 +282,17 @@ def main(argv: list[str] | None = None) -> int:
         for problem in problems:
             print(f"embedder: {problem}", file=sys.stderr)
         if not problems:
-            print(f"embedder: self-test passed: {DIMENSIONS} dimensions, unit norm, and a "
-                  "different vector for each prompt")
+            print(f"embedder: self-test passed: {WEIGHTS_DTYPE} weights, {DIMENSIONS} dimensions, "
+                  f"{VECTOR_DTYPE} vectors of unit norm within 2^-7, and a different vector for "
+                  "each prompt")
         return 1 if problems else 0
     health = {"status": "ok", "model": MODEL_ID, "revision": REVISION, "dimensions": DIMENSIONS,
+              "weights_dtype": WEIGHTS_DTYPE, "vector_dtype": VECTOR_DTYPE,
               "models": sorted(PROMPT_NAMES)}
     server = EmbeddingServer((LISTEN_HOST, LISTEN_PORT), encode, health)
     signal.signal(signal.SIGTERM, _interrupt)
-    print(f"embedder: serving {MODEL_ID} at {REVISION} on {LISTEN_HOST}:{LISTEN_PORT}",
-          file=sys.stderr, flush=True)
+    print(f"embedder: serving {MODEL_ID} at {REVISION} in {WEIGHTS_DTYPE} on "
+          f"{LISTEN_HOST}:{LISTEN_PORT}", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

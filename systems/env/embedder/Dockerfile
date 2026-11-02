@@ -32,8 +32,9 @@ RUN groupadd --system --gid 10001 embedder \
 COPY server.py /app/server.py
 
 # From here on the model is read offline. The self-test runs with no network at all: it loads the
-# model as the server does, which leaves the model's code file in the user's module cache, and
-# checks the vectors it gives one text, so that an image that builds is one that serves.
+# model as the server does, in bfloat16, which leaves the model's code file in the user's module
+# cache, checks that its weights are bfloat16 and checks the float32 vectors it gives one text,
+# so that an image that builds is one that serves.
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_HOME=/home/embedder/.cache/huggingface

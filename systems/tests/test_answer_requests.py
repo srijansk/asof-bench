@@ -1,8 +1,9 @@
 """The reader's answering run (reader/answer_requests.py), with stand-ins for the answering call and
 the client, so that it needs no SDK and makes no model call: the requests it accepts, the responses
 it writes and their keys, how many calls are under way at once, the stop on an infrastructure
-error and the resume that answers what the stop left, its run.json, its lock and its refusals.
-test_answer.py runs it once through the real client. Standard library only."""
+error and the resume that answers what the stop left, the stop after api_error responses in a row
+and how a resume counts them, its run.json, its lock and its refusals. test_answer.py runs it once
+through the real client. Standard library only."""
 
 from __future__ import annotations
 
@@ -13,8 +14,8 @@ import os
 import uuid
 
 import pytest
+from asofbench_systems import answer, usage
 from asofbench_systems import run as plumbing
-from asofbench_systems import usage
 from reader import answer_requests as reader
 
 MODEL = "claude-haiku-5-5"
@@ -124,7 +125,7 @@ def test_every_request_gets_one_response_under_its_own_key(layout):
     assert sorted(r["key"] for r in responses) == sorted(r["key"] for r in requests)
     by_key = {r["key"]: r for r in requests}
     for response in responses:
-        assert list(response) == list(reader.RESPONSE_FIELDS)
+        assert list(response) == list(answer.RESPONSE_FIELDS)
         assert response["answer"] == f"answer to {by_key[response['key']]['question']}"
     # Each request's question and context, with the run's model, and each call attributed in the
     # usage log to the request's key, the run's first invocation and attempt 1.
@@ -206,6 +207,60 @@ def test_a_request_that_was_not_answered_keeps_its_code_and_the_run_exits_1(layo
     # A resume has nothing left to answer, and the run's status stays 1.
     again = Asker()
     assert go(layout, again, resume=True) == plumbing.EXIT_FAILED and again.calls == []
+
+
+def api_errors(*numbers: int) -> dict[str, str]:
+    return {f"question {n}": "api_error" for n in numbers}
+
+
+def test_five_api_errors_in_a_row_stop_the_run_with_exit_status_3(layout):
+    requests = write_requests(layout, 10)
+    asker = Asker(errors=api_errors(*range(10)))
+    assert go(layout, asker, concurrency=1) == plumbing.EXIT_FAILURES
+    # The five responses stay, each its request's own error, and nothing after them is asked.
+    assert [(r["key"], r["answer"], r["error"]) for r in responses_of(layout)] == [
+        (r["key"], None, "api_error") for r in requests[:5]]
+    assert len(asker.calls) == 5 == reader.MAX_CONSECUTIVE_API_ERRORS
+    (invocation,) = record_of(layout)["invocations"]
+    assert (invocation["exit"], invocation["stop"]) == (
+        3, {"error": "5 consecutive api_error responses"})
+
+
+def test_four_api_errors_and_then_an_answer_or_a_refusal_do_not_stop_the_run(layout):
+    write_requests(layout, 15)
+    # Four in a row, an answer; four more, a refusal; four more, an answer.
+    asker = Asker(errors={**api_errors(0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13),
+                          "question 9": "refusal"})
+    assert go(layout, asker, concurrency=1) == plumbing.EXIT_FAILED
+    assert len(responses_of(layout)) == 15 and len(asker.calls) == 15
+    (invocation,) = record_of(layout)["invocations"]
+    assert (invocation["exit"], invocation["stop"]) == (1, None)
+
+
+def test_after_five_api_errors_in_a_row_the_calls_under_way_finish_and_no_other_starts(layout):
+    write_requests(layout, 40)
+    asker = Asker(errors=api_errors(*range(40)), delay=0.01)
+    assert go(layout, asker) == plumbing.EXIT_FAILURES
+    responses = responses_of(layout)
+    # Every call that began has its response, and the run stopped long before the file's end.
+    assert len(asker.calls) == len(responses) < 40
+    assert len(responses) >= reader.MAX_CONSECUTIVE_API_ERRORS
+
+
+def test_a_resume_counts_on_from_the_api_errors_that_the_responses_end_with(layout):
+    write_requests(layout, 12)
+    # Three answers, then four api_error responses and an infrastructure stop.
+    first = Asker(errors=api_errors(3, 4, 5, 6), raises={"question 7": Unreachable("down")})
+    assert go(layout, first, concurrency=1) == plumbing.EXIT_STOPPED
+    # The resumed run's first api_error response is the fifth in a row.
+    second = Asker(errors=api_errors(7, 8, 9, 10, 11))
+    assert go(layout, second, resume=True, concurrency=1) == plumbing.EXIT_FAILURES
+    assert [c["question"] for c in second.calls] == ["question 7"]
+    # And an answer first resets the count.
+    third = Asker(errors=api_errors(9, 10, 11))
+    assert go(layout, third, resume=True, concurrency=1) == plumbing.EXIT_FAILED
+    assert [c["question"] for c in third.calls] == [f"question {n}" for n in range(8, 12)]
+    assert reader.trailing_api_errors(responses_of(layout)) == 3
 
 
 def test_nothing_is_answered_unless_the_network_check_passes(layout):
@@ -320,7 +375,7 @@ def test_a_resume_drops_an_unfinished_last_line_and_refuses_a_line_it_cannot_pla
     # A response line that answers no request of the file, or a key a second time.
     responses.write_bytes(kept + json.dumps({**responses_of(layout)[0],
                                              "key": str(uuid.uuid4())}).encode() + b"\n")
-    with pytest.raises(plumbing.Refused, match="answers a key that the requests file does not"):
+    with pytest.raises(plumbing.Refused, match="answers a key that no request of the run holds"):
         go(layout, Asker(), resume=True)
     responses.write_bytes(kept + kept.splitlines(keepends=True)[0])
     with pytest.raises(plumbing.Refused, match="answers a key that has a response already"):

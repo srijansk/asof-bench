@@ -34,6 +34,10 @@ API unreachable, rate-limited, overloaded or failing, or refusing the key) is ra
 run stops and a resumed run answers the request again: an outage never gives a request a null
 answer.
 
+The reader writes one response per request, ``RESPONSE_FIELDS``: the request's key, then what
+``answer_once`` returns; ``responses_by_key`` reads a run's responses back, for the reader when it
+resumes and for the harness when it writes the rows.
+
 ``anthropic`` is imported only inside ``answer_once``, so the module imports where the SDK is not
 installed.
 """
@@ -43,8 +47,9 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections.abc import Collection
 
-from asofbench_systems.run import INFRASTRUCTURE, infrastructure_error
+from asofbench_systems.run import INFRASTRUCTURE, Refused, infrastructure_error
 
 # The answering models (section 11): claude-haiku-5-5 answers in every run, and claude-sonnet-5-5
 # again on the pilot items as the sensitivity check, each run with one of them.
@@ -66,6 +71,8 @@ SYSTEM_PROMPT = ("Answer the question that follows. Reply with a JSON object who
 RESULT_FIELDS = ("answer", "tokens_in", "tokens_out", "wall_s", "tool_calls", "error",
                  "thinking_blocks")
 ERRORS = ("refusal", "max_tokens", "api_error", "unparseable")
+# A response, one JSON line per request: the request's key, then what answer_once returns.
+RESPONSE_FIELDS = ("key", *RESULT_FIELDS)
 THINKING_TYPES = ("thinking", "redacted_thinking")
 CACHE_COUNTS = ("cache_creation_input_tokens", "cache_read_input_tokens")
 
@@ -95,9 +102,12 @@ def read_answer(content) -> tuple[object, str | None]:
     """The answer that a response's text blocks hold, read as one JSON object with an ``answer``
     field, and None; or None and ``unparseable``."""
     text = "".join(block.text for block in content if getattr(block, "type", None) == "text")
+    # Text that json.loads cannot parse, for whatever reason, is unparseable. Whether a reply
+    # nested deeply enough parses depends on the Python that reads it, but no reply that conforms
+    # to ANSWER_SCHEMA nests more than two levels, so the reading of one never depends on that.
     try:
         reply = json.loads(text)
-    except (ValueError, RecursionError):  # not JSON, or nested past the parser's depth
+    except (ValueError, RecursionError):
         return None, "unparseable"
     if not isinstance(reply, dict) or "answer" not in reply:
         return None, "unparseable"
@@ -135,3 +145,20 @@ async def answer_once(client, model: str, question: str, context: str | None) ->
         return result(None, tokens_in, tokens_out, begun, response.stop_reason, thinking)
     answer, error = read_answer(response.content)
     return result(answer, tokens_in, tokens_out, begun, error, thinking)
+
+
+def responses_by_key(responses: list[dict], keys: Collection[str], name: str) -> dict[str, dict]:
+    """The responses of a run by key; Refused unless every line of ``responses`` (the file
+    ``name``'s, which the refusal names) is the response to a request whose key ``keys`` holds and
+    each request has at most one."""
+    found: dict[str, dict] = {}
+    for number, response in enumerate(responses, 1):
+        if (not isinstance(response, dict) or set(response) != set(RESPONSE_FIELDS)
+                or not isinstance(response["key"], str)):
+            raise Refused(f"{name}: line {number} is not a response")
+        if response["key"] not in keys:
+            raise Refused(f"{name}: line {number} answers a key that no request of the run holds")
+        if response["key"] in found:
+            raise Refused(f"{name}: line {number} answers a key that has a response already")
+        found[response["key"]] = response
+    return found

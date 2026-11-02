@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import uuid
 from collections import Counter
@@ -326,3 +327,76 @@ def test_rows_refuses_responses_it_cannot_place(toy, tmp_path):
     keys_file.write_bytes(original)
     assert make_rows(run_dir, out) == 0
     assert make_rows(run_dir, out) == 2
+
+
+def test_an_interrupted_requests_leaves_no_requests_file_for_a_container_to_answer(toy, tmp_path,
+                                                                                    monkeypatch):
+    from reader import answer_requests
+
+    def interrupted(*args, **kwargs):
+        raise OSError("the disk filled")
+
+    real = uuid.uuid4
+    made = []
+
+    def uuid4_until_the_sixth():
+        made.append(1)
+        if len(made) > 5:
+            raise OSError("the disk filled")
+        return real()
+
+    # Interrupted while it writes the lines, and then while it writes the plan, which comes
+    # before either file has its name.
+    monkeypatch.setattr(harness.uuid, "uuid4", uuid4_until_the_sixth)
+    assert make_requests(toy, tmp_path / "lines") == 4
+    monkeypatch.setattr(harness.uuid, "uuid4", real)
+    monkeypatch.setattr(harness, "write_json", interrupted)
+    assert make_requests(toy, tmp_path / "plan") == 4
+    for run_dir in (tmp_path / "lines", tmp_path / "plan"):
+        assert not (run_dir / "input" / "requests.jsonl").exists()
+        assert not (run_dir / "keys.jsonl").exists() and not (run_dir / "plan.json").exists()
+        # The reader finds no requests file there, and the harness refuses the directory again.
+        with pytest.raises(answer_requests.Refused, match="is not a file"):
+            answer_requests.scan_requests(run_dir / "input" / "requests.jsonl")
+    monkeypatch.undo()
+    assert make_requests(toy, tmp_path / "lines") == 2
+
+
+def test_an_input_that_cannot_be_read_is_refused_with_exit_status_2(toy, tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    respond(run_dir, dict.fromkeys(keys, "Draft"))
+    out = tmp_path / "answers.jsonl"
+    # The keys file gone, and an answers file in a directory that does not exist.
+    kept = (run_dir / "keys.jsonl").read_bytes()
+    (run_dir / "keys.jsonl").unlink()
+    assert make_rows(run_dir, out) == 2 and not out.exists()
+    assert "keys.jsonl cannot be read (No such file or directory)" in capsys.readouterr().err
+    (run_dir / "keys.jsonl").write_bytes(kept)
+    assert make_rows(run_dir, tmp_path / "missing" / "answers.jsonl") == 2
+    # Files that the user cannot read: the responses, and the questions.
+    if os.geteuid() != 0:  # root reads a file whatever its mode
+        (run_dir / "output" / "responses.jsonl").chmod(0)
+        assert make_rows(run_dir, out) == 2 and not out.exists()
+        assert "responses.jsonl cannot be read (Permission denied)" in capsys.readouterr().err
+        data = tmp_path / "unreadable-data"
+        shutil.copytree(toy / "toy-data", data)
+        (data / "questions.jsonl").chmod(0)
+        assert harness.main(["requests", "--system", "closed-book", "--data", str(data),
+                             "--out-dir", str(tmp_path / "never")]) == 2
+        assert not (tmp_path / "never").exists()
+
+
+def test_an_error_that_no_rule_expects_exits_4_and_never_1(toy, tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    respond(run_dir, {k["key"]: "Draft" for k in lines(run_dir / "keys.jsonl")})
+
+    def broken(answer_type, value):
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(harness, "shape", broken)
+    out = tmp_path / "answers.jsonl"
+    assert make_rows(run_dir, out) == 4 and not out.exists()
+    assert "crashed (exit 4)" in capsys.readouterr().err

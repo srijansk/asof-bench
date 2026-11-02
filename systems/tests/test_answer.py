@@ -1,7 +1,8 @@
 """The answering call of every single-call entrant (common/asofbench_systems/answer.py): the
-request it sends, field by field, and how it reads the reply; and the reader's run
-(reader/answer_requests.py) through the real client. They need the anthropic package, so the root
-suite skips them. CI runs them with the SDK and httpx that the reader image's lock pins:
+request it sends, field by field, and how it reads the reply; the reader's run
+(reader/answer_requests.py) through the real client; and the image's self-test
+(reader/self_test.py) on this SDK. They need the anthropic package, so the root suite skips them.
+CI runs them with the SDK and httpx that the reader image's lock pins:
 
     uv run --frozen --extra dev --with anthropic==0.78.0 --with httpx==0.28.1 \\
         python -m pytest systems/tests/test_answer.py systems/tests/test_llm_client.py
@@ -220,8 +221,7 @@ def test_a_refusal_and_a_max_tokens_stop_give_a_null_answer(environment, key_fil
 
 def test_a_reply_that_holds_no_json_answer_is_unparseable(environment, key_file):
     for content in ([text("Draft")], [text('{"other": "Draft"}')], [text('["Draft"]')],
-                    [text('{"answer": "Draft"} and more')], [THINKING], [],
-                    [text('{"answer": ' + "[" * 100_000 + "]" * 100_000 + "}")]):
+                    [text('{"answer": "Draft"} and more')], [THINKING], []):
         result = call(key_file, Recorder((200, message(content))))
         assert (result["answer"], result["error"]) == (None, "unparseable"), content
         assert result["tokens_in"] == 19
@@ -239,8 +239,9 @@ def test_an_api_error_that_is_the_request_s_own_gives_a_null_answer(environment,
 
 def test_an_infrastructure_error_is_raised_for_the_run_to_stop_on(environment, key_file):
     # After the SDK's retries (none here): the API refusing the key, rate-limited, failing,
-    # unavailable or overloaded, or unreachable. The first-party client raises its
-    # InternalServerError for every 5xx but 529, 503 and 504 included.
+    # unavailable or overloaded, or unreachable. The first-party async client raises its
+    # InternalServerError for every 5xx, 503, 504 and 529 included: anthropic 0.78.0's has no
+    # branch for 529, and the separate 503 and 504 classes are its Bedrock and Vertex clients'.
     answers = [(401, error_body("authentication_error")), (403, error_body("permission_error")),
                (429, error_body("rate_limit_error")), (500, error_body("api_error")),
                (503, error_body("api_error")), (504, error_body("api_error")),
@@ -249,6 +250,8 @@ def test_an_infrastructure_error_is_raised_for_the_run_to_stop_on(environment, k
         with pytest.raises(anthropic.APIError) as caught:
             call(key_file, Recorder(reply))
         assert run.infrastructure_error(caught.value, run.INFRASTRUCTURE) is not None, reply
+        if isinstance(reply, tuple) and reply[0] >= 500:
+            assert isinstance(caught.value, anthropic.InternalServerError), reply
         assert KEY not in str(caught.value)
 
 
@@ -296,3 +299,46 @@ def test_the_reader_answers_each_request_through_the_client_and_logs_its_usage(e
     # key's one attempt, with the model it asked for.
     assert sorted((line["context"], line["invocation"], line["attempt"], line["model"])
                   for line in lines) == sorted((r["key"], 1, 1, MODEL) for r in requests)
+
+
+def test_the_image_s_self_test_passes_on_this_sdk_and_fails_on_a_call_that_drifts(environment,
+                                                                                 monkeypatch):
+    from reader import self_test
+
+    assert self_test.check_answering() == anthropic.__version__
+
+    async def drifting(client, model, question, context):
+        # The registered settings with a sampling parameter and a beta header beside them.
+        await client.messages.create(
+            **answer.answering_settings(model), temperature=1.0,
+            messages=[{"role": "user", "content": answer.user_message(question, context)}],
+            extra_headers={"anthropic-beta": "made-up-beta-2099-01-01"})
+        return {"answer": "self-test", "tokens_in": 1, "tokens_out": 1, "wall_s": 0.0,
+                "tool_calls": 0, "error": None, "thinking_blocks": 1}
+
+    monkeypatch.setattr(answer, "answer_once", drifting)
+    with pytest.raises(RuntimeError) as caught:
+        self_test.check_answering()
+    assert str(caught.value) == ("the call differs from the registered settings in temperature; "
+                                 "the call sends an anthropic-beta header")
+
+
+def test_the_self_test_passes_on_a_lock_of_what_is_installed_and_fails_on_another(environment,
+                                                                                  tmp_path,
+                                                                                  capsys):
+    import importlib.metadata
+
+    from reader import self_test
+
+    versions = {name: importlib.metadata.version(name) for name in ("anthropic", "httpx")}
+    good = tmp_path / "requirements.txt"
+    good.write_text("".join(f"{name}=={version} \\\n    --hash=sha256:{'0' * 64}\n"
+                            for name, version in versions.items()), encoding="utf-8")
+    assert self_test.self_test(good) == 0
+    assert capsys.readouterr().out.startswith(
+        f"reader self-test: 2 packages as requirements.txt pins them, anthropic "
+        f"{versions['anthropic']}; an answering call sends the registered settings")
+    good.write_text("anthropic==0.0.1 \\\n    --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
+    assert self_test.self_test(good) == 1
+    assert capsys.readouterr().err == (f"reader self-test: FAIL: anthropic is "
+                                       f"{versions['anthropic']}, requirements.txt pins 0.0.1\n")

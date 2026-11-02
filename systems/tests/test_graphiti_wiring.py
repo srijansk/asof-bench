@@ -26,9 +26,9 @@ PACKAGE = GRAPHITI.parent / "common" / "asofbench_systems"
 IMAGES = {name: "sha256:" + str(n) * 64 for n, name in enumerate(ingest.IMAGE_NAMES, 1)}
 # The names that ingest.py takes from the shared module, and so must not define.
 SHARED_NAMES = ("Refused", "Stop", "hold_lock", "cancelled_on_sigterm", "recorded", "write_json",
-                "read_jsonl", "drop_unfinished_line", "utc_now", "new_invocation", "NETCHECK",
-                "NETCHECK_ARGS", "RUN", "EXIT_DONE", "EXIT_FAILED", "EXIT_STOPPED",
-                "EXIT_FAILURES", "EXIT_CRASHED")
+                "read_jsonl", "drop_unfinished_line", "utc_now", "new_invocation", "append_line",
+                "error_text", "sha256_file", "crashed", "NETCHECK", "NETCHECK_ARGS", "RUN",
+                "EXIT_DONE", "EXIT_FAILED", "EXIT_STOPPED", "EXIT_FAILURES", "EXIT_CRASHED")
 
 
 def failure(module: str, name: str) -> type[Exception]:
@@ -102,6 +102,16 @@ def test_graphiti_stops_on_the_infrastructure_errors_that_it_stopped_on_before_t
     assert ingest.infrastructure_error(ValueError("bad output")) is None
     assert ingest.infrastructure_error(failure("anthropic._exceptions", "BadRequestError")(
         "prompt is too long")) is None
+
+
+def test_graphiti_s_key_check_refuses_with_the_text_it_gave_before_the_check_moved(tmp_path):
+    missing = tmp_path / "missing"
+    with pytest.raises(ingest.Refused) as caught:
+        ingest.check_key_file(str(missing))
+    assert str(caught.value) == (
+        f"the API key file {missing} cannot be read (No such file or directory): it reaches the "
+        "container as the Docker secret, which the container's user, uid 10001, must be able to "
+        "read (systems/graphiti/README.md)")
 
 
 def test_the_image_ids_are_graphiti_s_four_and_a_refusal_points_at_its_readme():

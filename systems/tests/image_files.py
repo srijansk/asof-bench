@@ -13,10 +13,15 @@ from pathlib import Path
 
 
 def copied_shared_files(dockerfile: str) -> set[str]:
-    """The files of the shared package that the COPY instructions of ``dockerfile`` copy. Docker
-    reads a line that starts with # as a comment wherever it falls, and a backslash at the end of
-    a line as continuing the instruction on the next, so a path named in a comment or in another
-    instruction copies nothing."""
+    """The files of the shared package that the COPY instructions of ``dockerfile`` copy."""
+    return copied_python_files(dockerfile, "common/asofbench_systems")
+
+
+def copied_python_files(dockerfile: str, directory: str) -> set[str]:
+    """The Python files of ``directory``, a path in the build's context, that the COPY
+    instructions of ``dockerfile`` copy. Docker reads a line that starts with # as a comment
+    wherever it falls, and a backslash at the end of a line as continuing the instruction on the
+    next, so a path named in a comment or in another instruction copies nothing."""
     instructions, current = [], ""
     for line in dockerfile.splitlines():
         if line.lstrip().startswith("#"):
@@ -34,7 +39,7 @@ def copied_shared_files(dockerfile: str) -> set[str]:
         if words and words[0].upper() == "COPY":
             sources = [word for word in words[1:] if not word.startswith("--")][:-1]
             copied |= {match[1] for source in sources
-                       if (match := re.fullmatch(r"common/asofbench_systems/(\w+\.py)", source))}
+                       if (match := re.fullmatch(rf"{re.escape(directory)}/(\w+\.py)", source))}
     return copied
 
 

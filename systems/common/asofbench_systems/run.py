@@ -8,9 +8,12 @@
   itself and releases the lock;
 - run.json's invocation records: ``new_invocation`` makes one, ``recorded`` writes it to run.json
   at once and again at the end, with its elapsed time and its exit status, and ``write_json``
-  writes the file atomically;
+  writes the file atomically, as ``write_text_atomically`` writes any text;
 - ``read_jsonl`` and ``drop_unfinished_line``, which read a log of JSON lines and cut the
-  unfinished last line that an interrupted write leaves;
+  unfinished last line that an interrupted write leaves, and ``append_line``, which appends one;
+- ``check_key_file``, which refuses to start without a readable API key file, ``sha256_file``,
+  ``error_text``, an exception as a log line keeps it with the key taken out, and ``crashed``,
+  which reports a crash with the key taken out;
 - ``parse_image_ids``, the IDs of the images a run uses, as the launcher gives them in
   ASOFBENCH_IMAGE_IDS;
 - ``wait_for_services`` and ``netcheck_preflight``: the wait for the services a system runs and
@@ -35,13 +38,15 @@ Graphiti's ingestion does.
 
 Nothing here belongs to one system: a system gives the table of its infrastructure errors, the
 names of its images, its services and mounts, the waits and the README that its refusals point at
-as arguments. It uses only the standard library.
+as arguments. It uses only the standard library and the key handling of asofbench_systems.llm,
+which needs no SDK.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -51,14 +56,21 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from asofbench_systems import llm
+
 # The files of an output directory that every system's run names the same way: the network
 # check's report, the record of the run's invocations, and the lock.
 NETCHECK, RUN, LOCK = "netcheck.json", "run.json", "run.lock"
+# How much of an exception's message a log line keeps (``error_text``), and the size of the reads
+# that ``sha256_file`` makes.
+ERROR_CHARS = 300
+CHUNK = 1 << 20
 # The network check's flags that every system gives it, as systems/README.md runs the check: the
 # proxy, the one target that it must let through, the targets it must refuse (code and package
 # hosts, the corpora's live sources and the host's own names), and two addresses that must be out
@@ -148,6 +160,34 @@ def parse_image_ids(text: str | None, names: Sequence[str], readme: str) -> dict
         raise Refused("ASOFBENCH_IMAGE_IDS must give the ID (sha256:...) of each image the run "
                       f"uses, as name=ID entries for {', '.join(names)} ({readme})")
     return {name: images[name] for name in names}
+
+
+def check_key_file(key_file: str, readme: str) -> None:
+    """Refused unless the API key file can be read and holds a key, with a message that points at
+    ``readme``. The refusal names the file and why, never what it holds: on a Linux host the secret
+    keeps the host file's owner and mode, which the container's user, uid 10001, must be able to
+    read."""
+    try:
+        llm.read_key(key_file)
+    except llm.KeyFileError as error:
+        raise Refused(f"the API key file {error}: it reaches the container as the Docker secret, "
+                      "which the container's user, uid 10001, must be able to read "
+                      f"({readme})") from None
+
+
+def error_text(error: BaseException, key_file: str) -> str:
+    """The exception's class and the first ERROR_CHARS characters of its message, as a log line
+    keeps it, with the key that ``key_file`` holds taken out first."""
+    message = llm.redact(str(error), key_file)[:ERROR_CHARS]
+    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def crashed(error: BaseException, key_file: str, prefix: str) -> int:
+    """Prints a crash, the key taken out, and returns its exit status."""
+    text = "".join(traceback.format_exception(error))
+    print(f"{prefix}: crashed ({type(error).__name__}); run.json records exit "
+          f"{EXIT_CRASHED}\n{llm.redact(text, key_file)}", file=sys.stderr)
+    return EXIT_CRASHED
 
 
 def utc_now() -> str:
@@ -264,15 +304,41 @@ def drop_unfinished_line(path: Path) -> int:
     return len(data) - keep
 
 
-def write_json(path: Path, value: dict) -> None:
-    """Writes ``value`` to ``path`` atomically: a temporary file in the same directory, then a
-    rename over the old one, so that an interrupted write never leaves half a file."""
-    temporary = path.with_name(f".{path.name}.tmp")
+def append_line(path: Path, line: dict) -> None:
+    """Appends ``line`` to the JSON lines at ``path``, with one write of the whole line."""
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def temporary_path(path: Path) -> Path:
+    """Where a file that replaces ``path`` whole is written before the rename: a hidden file in the
+    same directory, so that the rename is atomic."""
+    return path.with_name(f".{path.name}.tmp")
+
+
+def write_text_atomically(path: Path, text: str) -> None:
+    """Writes ``text`` to ``path`` atomically: a temporary file in the same directory, flushed to
+    the disk, then a rename over the old one, so that an interrupted write never leaves half a
+    file."""
+    temporary = temporary_path(path)
     with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, indent=2) + "\n")
+        handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def write_json(path: Path, value: dict) -> None:
+    """Writes ``value`` to ``path`` atomically (``write_text_atomically``)."""
+    write_text_atomically(path, json.dumps(value, indent=2) + "\n")
 
 
 def wait_for_services(services: Sequence[tuple[str, int]], wait_s: float,

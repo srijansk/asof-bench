@@ -15,3 +15,7 @@ anthropic==0.78.0
 # pytest runs the answering and client tests inside the image (systems/tests/test_answer.py and
 # test_llm_client.py), at the version that Graphiti's image installs.
 pytest==9.0.3
+# packaging reads the environment markers of the lock's pins in the image's self-test
+# (reader/self_test.py), so it is named here, at the version that pytest brought in, and does not
+# depend on pytest staying in the image.
+packaging==26.3

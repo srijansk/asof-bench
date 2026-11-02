@@ -91,11 +91,13 @@
     "concurrency": 8,
     "max_retries": 8,
     "timeout_s": 600.0,
+    "max_consecutive_api_errors": 5,
     "order": "the requests file's order, read one line at a time, with 8 calls under way at once",
-    "infrastructure": "an infrastructure error stops the run with exit status 2 and writes no response for its request, so that a resumed run answers it: after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, OverloadedError, InternalServerError, AuthenticationError, PermissionDeniedError; the client raises InternalServerError for every 5xx but 529, 503 and 504 among them), or the standard library's ConnectionError; the requests under way finish and keep their responses, and no other starts",
+    "infrastructure": "an infrastructure error stops the run with exit status 2 and writes no response for its request, so that a resumed run answers it: after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, InternalServerError, AuthenticationError or PermissionDeniedError, the classes that anthropic 0.78.0's client raises for these: InternalServerError for every 5xx, 503, 504 and 529 included, since that client has no branch of its own for 529; the shared table also names OverloadedError, which that client never raises), or the standard library's ConnectionError; the requests under way finish and keep their responses, and no other starts",
+    "consecutive_api_errors": "5 api_error responses in a row, in the order they are written, stop the run with exit status 3: each is its request's own error and stays, but so many in a row point at a cause that every request shares, such as a setting that the API rejects, which would give one to every request left; the requests under way finish and keep their responses, and no other starts. A resume answers only the requests that have no response, so a run that stopped this way for a cause of the run is discarded and run again in a new run directory once the cause is fixed, never resumed under changed settings; a resumed run counts on from the api_error responses at the end of the responses file",
     "resume": "answer_requests --resume answers every request that has no response, after checking that the requests file, the responses file and the model are those that the run began with",
     "lock": "every invocation holds the output directory's lock, run.lock, created with O_EXCL and touched every 30 s, and removes it at its end; a second invocation on the directory stops at once with exit status 2",
-    "exit_status": "0 when every request has a response with an answer; 1 when every request has a response and some of them have an error code; 2 when it is refused before it starts, the network check fails or an infrastructure error stops it; 4 when it crashes, which run.json records with the exception's class"
+    "exit_status": "0 when every request has a response with an answer; 1 when every request has a response and some of them have an error code; 2 when it is refused before it starts, the network check fails or an infrastructure error stops it; 3 when 5 api_error responses in a row stop it; 4 when it crashes, which run.json records with the exception's class"
   },
   "network_policy": {
     "routes_out": [
@@ -147,7 +149,7 @@
       "typing-inspection": "0.4.4"
     },
     "images": {
-      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test, run with no network",
+      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/self_test.py), run with no network",
       "asofbench/egress": "built from env/egress, on the base image above",
       "per_run": "each run records the IDs of the two images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
     }

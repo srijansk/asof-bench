@@ -27,13 +27,14 @@ RUN groupadd --system --gid 10001 reader \
     && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/reader \
        --shell /usr/sbin/nologin reader
 
-# The reader's own files, one by one: the shared package's files that the runner imports, the
-# network check and the runner. No entrant's configuration and no other file of the repository.
+# The reader's own files, one by one: the shared package's files that the runner and its
+# self-test import, the network check, the runner and the self-test. No entrant's configuration
+# and no other file of the repository.
 COPY common/asofbench_systems/__init__.py common/asofbench_systems/answer.py \
      common/asofbench_systems/llm.py common/asofbench_systems/run.py \
      common/asofbench_systems/usage.py /app/asofbench_systems/
 COPY env/netcheck.py /app/env/netcheck.py
-COPY reader/answer_requests.py /app/reader/
+COPY reader/answer_requests.py reader/self_test.py /app/reader/
 RUN printf '#!/bin/sh\nexec python -m reader.answer_requests "$@"\n' > /usr/local/bin/answer_requests \
     && chmod 755 /usr/local/bin/answer_requests
 
@@ -41,12 +42,12 @@ ENV PYTHONPATH=/app
 WORKDIR /app
 USER 10001:10001
 
-# The self-test runs with no network at all, through the command that every run uses: it imports
-# every module the runner imports, the SDK and httpx among them, checks that the installed packages
-# are the ones requirements.txt pins and that the network check is in place, and makes one
-# answering call through the installed SDK to an httpx MockTransport, which must send the
-# registered settings and nothing else, so that an image that builds is one that answers as
-# registered.
+# The self-test (self_test.py) runs with no network at all, through the command that every run
+# uses: it imports every module the runner imports, the SDK and httpx among them, checks that the
+# installed packages are the ones requirements.txt pins and that the network check is in place,
+# and makes one answering call through the installed SDK to an httpx MockTransport, which must
+# send the registered settings and nothing else, so that an image that builds is one that
+# answers as registered.
 RUN --network=none answer_requests --self-test
 
 CMD ["answer_requests", "--help"]

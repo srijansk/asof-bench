@@ -1,12 +1,15 @@
 """The plumbing that every system's run shares (common/asofbench_systems/run.py): the output
 directory's lock and the SIGTERM that cancels an invocation, run.json's invocation records and
 their atomic writes, JSON lines, the image IDs, the wait for the services and the network check,
-the classification of infrastructure errors, and the stop. What each piece does with Graphiti's
-own values is checked in test_ingest_resume.py. Standard library only."""
+the classification of infrastructure errors, the stop, and the key check, the error text, the
+crash report, the hash of a file and the atomic write of any text. What each piece does with
+Graphiti's own values is checked in test_ingest_resume.py and test_graphiti_wiring.py. Standard
+library only."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -501,3 +504,72 @@ def test_the_exit_statuses_and_the_names_of_the_files_every_run_shares():
     assert not hasattr(run, "EXIT_INGESTED")
     assert (run.NETCHECK, run.RUN, run.LOCK) == ("netcheck.json", "run.json", "run.lock")
     assert run.LOCK_HEARTBEAT_S == 30.0
+
+
+KEY = "sk-ant-api00-made-up-for-tests-" + "5" * 40
+
+
+def test_the_key_check_refuses_a_file_without_a_key_and_points_at_the_readme_given(tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY + "\n", encoding="ascii")
+    run.check_key_file(str(key_file), "systems/reader/README.md")
+    key_file.write_text(f"{KEY}\n{KEY}\n", encoding="ascii")
+    for path, why in ((tmp_path / "missing", "cannot be read (No such file or directory)"),
+                      (key_file, "does not hold an API key (one line of printable ASCII with no "
+                                 "space)")):
+        with pytest.raises(run.Refused) as caught:
+            run.check_key_file(str(path), "systems/reader/README.md")
+        assert str(caught.value) == (
+            f"the API key file {path} {why}: it reaches the container as the Docker secret, which "
+            "the container's user, uid 10001, must be able to read (systems/reader/README.md)")
+        assert KEY not in str(caught.value)
+
+
+def test_an_error_s_text_keeps_its_class_and_300_characters_without_the_key(tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY + "\n", encoding="ascii")
+    assert run.error_text(RuntimeError(f"rejected {KEY}"), str(key_file)) == (
+        "RuntimeError: rejected [redacted]")
+    assert run.error_text(ValueError("x" * 400), str(key_file)) == "ValueError: " + "x" * 300
+    assert run.error_text(KeyError(), str(key_file)) == "KeyError"
+    assert run.ERROR_CHARS == 300
+
+
+def test_a_crash_is_printed_without_the_key_and_gives_exit_status_4(tmp_path, capsys):
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY + "\n", encoding="ascii")
+    try:
+        raise RuntimeError(f"a bug that quotes {KEY}")
+    except RuntimeError as error:
+        assert run.crashed(error, str(key_file), "answer_requests") == run.EXIT_CRASHED == 4
+    printed = capsys.readouterr().err
+    assert printed.startswith("answer_requests: crashed (RuntimeError); run.json records exit 4\n"
+                              "Traceback (most recent call last):\n")
+    assert "a bug that quotes [redacted]" in printed and KEY not in printed
+
+
+def test_a_line_is_appended_whole_and_a_file_is_hashed_in_chunks(tmp_path, monkeypatch):
+    path = tmp_path / "log.jsonl"
+    run.append_line(path, {"key": "a", "text": "café "})
+    run.append_line(path, {"key": "b"})
+    assert path.read_text(encoding="utf-8") == ('{"key": "a", "text": "café "}\n'
+                                                '{"key": "b"}\n')
+    monkeypatch.setattr(run, "CHUNK", 3)
+    assert run.sha256_file(path) == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_text_is_written_whole_or_not_at_all_beside_its_file(tmp_path, monkeypatch):
+    path = tmp_path / "answers.jsonl"
+    assert run.temporary_path(path) == tmp_path / ".answers.jsonl.tmp"
+    run.write_text_atomically(path, "one\n")
+    run.write_text_atomically(path, "two\n")
+    assert path.read_text(encoding="utf-8") == "two\n"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["answers.jsonl"]
+
+    def interrupted(source, target):
+        raise OSError("interrupted before the rename")
+
+    monkeypatch.setattr(run.os, "replace", interrupted)
+    with pytest.raises(OSError):
+        run.write_text_atomically(path, "three\n")
+    assert path.read_text(encoding="utf-8") == "two\n"

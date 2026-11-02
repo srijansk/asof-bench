@@ -69,12 +69,14 @@ records its invocation in run.json.
 
 What every system's run shares (the lock, the SIGTERM handling, run.json's invocation records
 and their atomic writes, the network check and the wait for the services, the image IDs, the
-classification of infrastructure errors, the stop and the exit statuses) is in
+classification of infrastructure errors, the stop and the exit statuses, and the key check, the
+log's lines and error texts, the SHA-256 of a file and the report of a crash) is in
 ``asofbench_systems.run``, with the network check's flags that every system gives it
 (``NETCHECK_ARGS``). This module gives it Graphiti's own values (``INFRASTRUCTURE``,
-``IMAGE_NAMES``, ``SERVICES``, ``MOUNTS`` and the waits) and re-exports its names, so that
-``infrastructure_error``, ``parse_image_ids`` and ``netcheck_preflight`` here are the shared
-functions with those values given, and ``EXIT_INGESTED`` is its ``EXIT_DONE``.
+``IMAGE_NAMES``, ``README``, ``SERVICES``, ``MOUNTS`` and the waits) and re-exports its names, so
+that ``infrastructure_error``, ``parse_image_ids``, ``check_key_file`` and ``netcheck_preflight``
+here are the shared functions with those values given, and ``EXIT_INGESTED`` is its
+``EXIT_DONE``.
 
 The state, log and summary functions use only the standard library; graphiti-core and anthropic
 are imported only by adapter.open_engine.
@@ -84,13 +86,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import sys
 import time
-import traceback
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -98,8 +98,8 @@ from pathlib import Path
 
 from asofbench_systems import llm, usage
 from asofbench_systems import run as plumbing
+from asofbench_systems.run import EXIT_CRASHED as EXIT_CRASHED  # re-exported: crashed's status
 from asofbench_systems.run import (
-    EXIT_CRASHED,
     EXIT_DONE,
     EXIT_FAILED,
     EXIT_FAILURES,
@@ -109,12 +109,16 @@ from asofbench_systems.run import (
     RUN,
     Refused,
     Stop,
+    append_line,
     cancelled_on_sigterm,
+    crashed,
     drop_unfinished_line,
+    error_text,
     hold_lock,
     new_invocation,
     read_jsonl,
     recorded,
+    sha256_file,
     utc_now,
     write_json,
 )
@@ -141,8 +145,6 @@ MAX_CONSECUTIVE_FAILURES = 5
 SKIPPED = "skipped by the operator after repeated infrastructure stops"
 # The usage context of the model calls that remove_episode makes.
 REMOVAL_CONTEXT = "remove-episode:"
-# How much of an exception's message the log keeps.
-ERROR_CHARS = 300
 # The prompt length up to which the price basis's prices hold (section 13).
 PRICED_INPUT_TOKENS = 100_000
 # The exceptions that stop a run as infrastructure errors, by the top-level package that defines
@@ -172,7 +174,6 @@ MOUNTS = ("/input", "/output", "/run/secrets")
 # How long the run waits for the services to accept connections (the embedder loads its model
 # first), and how often it tries.
 SERVICE_WAIT_S, SERVICE_RETRY_S = 600.0, 2.0
-CHUNK = 1 << 20
 
 
 @dataclass
@@ -202,23 +203,9 @@ def parse_image_ids(text: str | None) -> dict[str, str]:
 
 
 def check_key_file(key_file: str) -> None:
-    """Refused unless the API key file can be read and holds a key. The refusal names the file and
-    why, never what it holds: on a Linux host the secret keeps the host file's owner and mode,
-    which the container's user, uid 10001, must be able to read."""
-    try:
-        llm.read_key(key_file)
-    except llm.KeyFileError as error:
-        raise Refused(f"the API key file {error}: it reaches the container as the Docker secret, "
-                      "which the container's user, uid 10001, must be able to read "
-                      f"({README})") from None
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Refused unless the API key file can be read and holds a key; the refusal names the file and
+    why, never what it holds (``asofbench_systems.run.check_key_file`` with Graphiti's README)."""
+    plumbing.check_key_file(key_file, README)
 
 
 def read_stream(stream: Path) -> list[dict]:
@@ -425,18 +412,6 @@ def summarize(episodes: list[dict], log: list[dict], usage_lines: list[dict], re
             "response_models": sorted({line["response_model"] for line in usage_lines
                                        if line.get("response_model")}),
             "images": images}
-
-
-def error_text(error: BaseException, key_file: str) -> str:
-    """The log's ``error``: the exception's class and the first ERROR_CHARS characters of its
-    message, with the key taken out first."""
-    message = llm.redact(str(error), key_file)[:ERROR_CHARS]
-    return f"{type(error).__name__}: {message}" if message else type(error).__name__
-
-
-def append_line(path: Path, line: dict) -> None:
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
 async def check_store(engine, log: list[dict]) -> None:
@@ -698,14 +673,6 @@ async def remove_episodes(uuids: list[str], out_dir: Path, *, images: dict[str, 
                 await engine.close()
             invocation["exit"] = status
             return status
-
-
-def crashed(error: BaseException, key_file: str, prefix: str) -> int:
-    """Prints a crash, the key taken out, and returns its exit status."""
-    text = "".join(traceback.format_exception(error))
-    print(f"{prefix}: crashed ({type(error).__name__}); run.json records exit "
-          f"{EXIT_CRASHED}\n{llm.redact(text, key_file)}", file=sys.stderr)
-    return EXIT_CRASHED
 
 
 def main(argv: list[str] | None = None) -> int:

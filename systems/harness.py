@@ -20,6 +20,10 @@ MANIFEST.json registers, and writes a new run directory, outside the repository:
   and run, and the name and SHA-256 of each file they come from (questions.jsonl, MANIFEST.json
   and the items file) and of requests.jsonl and keys.jsonl.
 
+requests.jsonl and keys.jsonl are written under temporary names and renamed only after plan.json
+is written, keys.jsonl first and requests.jsonl last, so that an interrupted invocation leaves no
+requests.jsonl for a container to answer.
+
 A system is asked the items of its entries as the scorer counts them (``asofbench.scoring.Scope``
 with no entries file, section 12): closed book, the oracle and grep at D every item in every arm
 its ``arms`` field lists, and long context only the F1, F2 and CF items. ``--items``, a list of
@@ -30,18 +34,21 @@ pilot's items, and ``--runs`` (by default 1,2,3) to some of the three runs.
         --out <answers.jsonl>
 
 reads the run directory's plan.json and keys.jsonl and the container's run.json and responses in
-``output/``, and writes one answer row per key, in keys.jsonl's order, with the nine fields of
-section 12 and no other: ``id``, ``system``, ``arm``, ``run``, ``answer``, ``tokens_in``,
-``tokens_out``, ``wall_s`` and ``tool_calls``. The answer is shaped by the item's answer type and
-nothing else is done to it (``shape``). A request that the system could not answer has a
-response with a null answer, and so has its row. A key with no response at all, which a run that
-stopped and was not resumed leaves, gets a row with a null answer and null cost fields, which
-scores zero, and rows says how many and exits 1: resume the run first. ``--system`` is the name
-the rows carry, the system that the requests were written for or an outside entry's name, such as
-a toy run's, that no registered system has.
+``output/`` (``asofbench_systems.answer.responses_by_key``), and writes, atomically, one answer
+row per key, in keys.jsonl's order, with the nine fields of section 12 and no other: ``id``,
+``system``, ``arm``, ``run``, ``answer``, ``tokens_in``, ``tokens_out``, ``wall_s`` and
+``tool_calls``. The answer is shaped by the item's answer type and nothing else is done to it
+(``shape``). A request that the system could not answer has a response with a null answer, and so
+has its row. A key with no response at all, which a run that stopped and was not resumed leaves,
+gets a row with a null answer and null cost fields, which scores zero, and rows says how many and
+exits 1: resume the run first. ``--system`` is the name the rows carry, the system that the
+requests were written for or an outside entry's name, such as a toy run's, that no registered
+system has.
 
 Exit status: 0 when the requests, or the rows, are written; 1 when rows wrote rows for keys with
-no response; 2, with the reason, when an input is refused, and then nothing is written.
+no response; 2, with the reason, when an input is refused (one that cannot be read among them),
+and then nothing is written; 4, with the traceback, for an error that no rule expects, so that no
+failure exits with a status that means something else.
 
 It uses the standard library and the asofbench package, and puts systems/common on the import
 path, since nothing installs ``asofbench_systems`` on the host.
@@ -50,20 +57,34 @@ path, since nothing installs ``asofbench_systems`` on the host.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import sys
+import traceback
 import uuid
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 SYSTEMS = Path(__file__).resolve().parent
 if str(SYSTEMS / "common") not in sys.path:
     sys.path.insert(0, str(SYSTEMS / "common"))
 
 from asofbench_systems import answer  # noqa: E402
-from asofbench_systems.run import RUN, Refused, read_jsonl, write_json  # noqa: E402
+from asofbench_systems.run import (  # noqa: E402
+    EXIT_CRASHED,
+    EXIT_DONE,
+    EXIT_FAILED,
+    EXIT_STOPPED,
+    RUN,
+    Refused,
+    read_jsonl,
+    sha256_file,
+    temporary_path,
+    write_json,
+    write_text_atomically,
+)
 
 from asofbench import scoring  # noqa: E402
 
@@ -75,8 +96,6 @@ KEY_FIELDS = ("key", "id", "arm", "run", "answer_type")
 ROW_FIELDS = ("id", "system", "arm", "run", "answer", "tokens_in", "tokens_out", "wall_s",
               "tool_calls")
 COSTS = ROW_FIELDS[5:]
-# A response, as the reader writes it (reader/answer_requests.py): the key, then answer_once's.
-RESPONSE_FIELDS = ("key", *answer.RESULT_FIELDS)
 QUESTION_FIELDS = ("id", "question", "family", "answer_type", "arms")
 RUNS = (1, 2, 3)
 # The systems whose requests the harness writes, each with the function that gives a request its
@@ -84,15 +103,17 @@ RUNS = (1, 2, 3)
 CONTEXTS = {"closed-book": None}
 # A count written as a string: ASCII digits, after an optional minus sign.
 COUNT = re.compile(r"-?[0-9]+")
-CHUNK = 1 << 20
+T = TypeVar("T")
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
+def read_input(read: Callable[[Path], T], path: Path) -> T:
+    """``read(path)`` for a file that the harness reads, with a file that cannot be read refused
+    by its name and why, as ``load_json`` refuses one."""
+    try:
+        return read(path)
+    except OSError as error:
+        raise Refused(f"{path.name} cannot be read ({error.strerror or type(error).__name__})"
+                      ) from None
 
 
 def load_json(path: Path) -> dict:
@@ -130,6 +151,7 @@ def shape(answer_type: str, value):
     if answer_type == "set":
         if not isinstance(value, str):
             return value
+        # A string that json.loads cannot parse, for whatever reason, is kept as it came.
         try:
             parsed = json.loads(value)
         except (ValueError, RecursionError):
@@ -162,11 +184,11 @@ def read_questions(data: Path) -> tuple[list[dict], dict, dict]:
     registered = entry.get("sha256") if isinstance(entry, dict) else None
     if not (data / QUESTIONS).is_file():
         raise Refused(f"{data} holds no {QUESTIONS}")
-    actual = sha256_file(data / QUESTIONS)
+    actual = read_input(sha256_file, data / QUESTIONS)
     if actual != registered:
         raise Refused(f"{QUESTIONS} is not the build's: its SHA-256 is {actual}, and the build's "
                       f"manifest ({MANIFEST}) registers {registered}")
-    questions = read_jsonl(data / QUESTIONS)
+    questions = read_input(read_jsonl, data / QUESTIONS)
     ids = set()
     for number, q in enumerate(questions, 1):
         if (not isinstance(q, dict) or any(name not in q for name in QUESTION_FIELDS)
@@ -177,18 +199,21 @@ def read_questions(data: Path) -> tuple[list[dict], dict, dict]:
             raise Refused(f"{QUESTIONS}: line {number}'s id occurs twice")
         ids.add(q["id"])
     return (questions, {"file": QUESTIONS, "sha256": actual},
-            {"file": MANIFEST, "sha256": sha256_file(data / MANIFEST)})
+            {"file": MANIFEST, "sha256": read_input(sha256_file, data / MANIFEST)})
 
 
 def read_items(path: Path, questions: list[dict]) -> tuple[frozenset[str], dict]:
     """The item ids of an items file, read as ``asofbench score --items`` reads it (the scorer's
     own reading, so that a pilot run's requests are the items that its score counts), with the
-    file's name, SHA-256 and number of ids; Refused for a file the scorer would refuse."""
+    file's name, SHA-256 and number of ids; Refused for a file the scorer would refuse, or one
+    that cannot be read."""
+    by_id = {q["id"]: q for q in questions}
     try:
-        items, _ = scoring._items(path, {q["id"]: q for q in questions})
+        items, _ = read_input(lambda listed: scoring._items(listed, by_id), path)
     except scoring.ScoringError as error:
         raise Refused(str(error)) from None
-    return items, {"file": path.name, "sha256": sha256_file(path), "ids": len(items)}
+    return items, {"file": path.name, "sha256": read_input(sha256_file, path),
+                   "ids": len(items)}
 
 
 def plan_requests(questions: list[dict], system: str, items: frozenset[str] | None,
@@ -217,12 +242,14 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
     if not planned:
         raise Refused(f"no item is asked: {system}'s entries hold none of the items given")
     context_of = CONTEXTS[system]
+    requests_path, keys_path = out_dir / INPUT / REQUESTS, out_dir / KEYS
+    pending_requests, pending_keys = temporary_path(requests_path), temporary_path(keys_path)
     (out_dir / INPUT).mkdir(parents=True)
     (out_dir / OUTPUT).mkdir()
     counts: dict[str, dict[str, dict[str, int]]] = {}
     used: set[str] = set()
-    with open(out_dir / INPUT / REQUESTS, "w", encoding="utf-8") as requests, \
-            open(out_dir / KEYS, "w", encoding="utf-8") as keys:
+    with open(pending_requests, "w", encoding="utf-8") as requests, \
+            open(pending_keys, "w", encoding="utf-8") as keys:
         for q, arm, run in planned:
             key = str(uuid.uuid4())
             while key in used:
@@ -236,17 +263,23 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
                                    "answer_type": q["answer_type"]}) + "\n")
             by_run = counts.setdefault(arm, {}).setdefault(q["family"], {})
             by_run[str(run)] = by_run.get(str(run), 0) + 1
+        for handle in (requests, keys):
+            handle.flush()
+            os.fsync(handle.fileno())
     write_json(out_dir / PLAN, {
         "system": system, "runs": list(runs), "questions": questions_file,
         "manifest": manifest_file, "items": items_file, "requests": len(planned),
-        "counts": counts, "requests_sha256": sha256_file(out_dir / INPUT / REQUESTS),
-        "keys_sha256": sha256_file(out_dir / KEYS)})
+        "counts": counts, "requests_sha256": sha256_file(pending_requests),
+        "keys_sha256": sha256_file(pending_keys)})
+    # The keys first and the requests last: a run directory with a requests file is a whole one.
+    os.replace(pending_keys, keys_path)
+    os.replace(pending_requests, requests_path)
     print(f"harness.py requests: {len(planned)} requests for {system} "
           f"({len({q['id'] for q, _, _ in planned})} items, runs "
-          f"{', '.join(map(str, runs))}) in {out_dir / INPUT / REQUESTS}; the container is given "
+          f"{', '.join(map(str, runs))}) in {requests_path}; the container is given "
           f"{out_dir / INPUT} read-only and {out_dir / OUTPUT}, and nothing else of the run "
           "directory")
-    return 0
+    return EXIT_DONE
 
 
 def read_responses(run_dir: Path, plan: dict, keys: set[str]) -> tuple[dict[str, dict], dict]:
@@ -256,22 +289,14 @@ def read_responses(run_dir: Path, plan: dict, keys: set[str]) -> tuple[dict[str,
     if not record_path.is_file():
         raise Refused(f"the system has not answered this run: {OUTPUT}/{RUN} is missing")
     record = load_json(record_path)
-    if record.get("requests_sha256") != plan["requests_sha256"]:
+    if record.get("requests_sha256") != plan.get("requests_sha256"):
         raise Refused(f"the responses in {OUTPUT}/ answer another requests file: its SHA-256 is "
-                      f"{record.get('requests_sha256')}, this run's {plan['requests_sha256']}")
+                      f"{record.get('requests_sha256')}, this run's {plan.get('requests_sha256')}")
     name = record.get("responses")
     if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
         raise Refused(f"{OUTPUT}/{RUN} names no responses file in {OUTPUT}/")
-    responses: dict[str, dict] = {}
-    for number, response in enumerate(read_jsonl(run_dir / OUTPUT / name), 1):
-        if not isinstance(response, dict) or set(response) != set(RESPONSE_FIELDS):
-            raise Refused(f"{name}: line {number} is not a response")
-        if response["key"] not in keys:
-            raise Refused(f"{name}: line {number} answers a key that this run did not ask")
-        if response["key"] in responses:
-            raise Refused(f"{name}: line {number} answers a key that has a response already")
-        responses[response["key"]] = response
-    return responses, record
+    lines = read_input(read_jsonl, run_dir / OUTPUT / name)
+    return answer.responses_by_key(lines, keys, name), record
 
 
 def write_rows(system: str, run_dir: Path, out: Path) -> int:
@@ -284,9 +309,11 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
                       f"name, or an outside entry's that no registered system has, not {system}")
     if out.exists():
         raise Refused(f"{out} exists already: give the rows a new file")
-    if sha256_file(run_dir / KEYS) != plan.get("keys_sha256"):
+    if not out.parent.is_dir():
+        raise Refused(f"{out.parent} is not a directory")
+    if read_input(sha256_file, run_dir / KEYS) != plan.get("keys_sha256"):
         raise Refused(f"{KEYS} is not the one that {PLAN} records: its SHA-256 differs")
-    keys = read_jsonl(run_dir / KEYS)
+    keys = read_input(read_jsonl, run_dir / KEYS)
     responses, record = read_responses(run_dir, plan, {key["key"] for key in keys})
     rows, missing = [], 0
     for key in keys:
@@ -298,13 +325,8 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
         else:
             rows.append({**row, "answer": shape(key["answer_type"], response["answer"]),
                          **{name: response[name] for name in COSTS}})
-    temporary = out.with_name(f".{out.name}.tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, out)
+    write_text_atomically(out, "".join(json.dumps(row, ensure_ascii=False) + "\n"
+                                       for row in rows))
     unanswered = sum(1 for response in responses.values() if response["error"])
     print(f"harness.py rows: {len(rows)} rows for {system} in {out}, answered by "
           f"{record.get('model')}: {len(rows) - missing - unanswered} with an answer, "
@@ -313,8 +335,8 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
         print(f"harness.py rows: {missing} of the {len(rows)} keys have no response, so their "
               "rows have a null answer, which scores zero: the run stopped before it answered "
               "them; resume it, then write the rows again", file=sys.stderr)
-        return 1
-    return 0
+        return EXIT_FAILED
+    return EXIT_DONE
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,7 +363,11 @@ def main(argv: list[str] | None = None) -> int:
         return write_rows(args.system, args.run_dir, args.out)
     except Refused as refusal:
         print(f"harness.py {args.command}: {refusal}", file=sys.stderr)
-        return 2
+        return EXIT_STOPPED
+    except Exception:  # noqa: BLE001 - an error that no rule expects: its own exit status
+        print(f"harness.py {args.command}: crashed (exit {EXIT_CRASHED})\n"
+              f"{traceback.format_exc()}", file=sys.stderr)
+        return EXIT_CRASHED
 
 
 if __name__ == "__main__":

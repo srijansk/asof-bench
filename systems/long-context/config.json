@@ -1,0 +1,174 @@
+{
+  "system": "long-context",
+  "description": "Long context: the answering model receives the question and, as its context, every episode of the one proposal that the question names, from the item's arm's stream, those recorded after the item's date included, in stream order (PREREGISTRATION.md section 11). systems/harness.py builds each request's context from the streams (long_context) and writes the requests and the answer rows, and the reader image (systems/reader) answers the requests, unchanged, with asofbench_systems.answer.answer_once; systems/README.md describes both.",
+  "inputs": "the question text and, as its context, every episode that the item's arm's stream holds of the proposal the question names, those recorded after the item's date included, in stream order",
+  "entries": "the F1, F2 and CF items in every arm that their arms field lists (section 12), each three times (runs 1, 2 and 3), and no F3, F4 or F5 item; in a pilot run, the items of a list such as data/v0.1/pilot.json (harness.py requests --items); harness.py requests --streams-dir names the directory that holds the streams",
+  "requests": {
+    "fields": [
+      "key",
+      "question",
+      "context"
+    ],
+    "key": "a random UUID4 for each item, arm and run, which says nothing of the item and is never the same twice",
+    "order": "ascending key order: the keys are random UUID4s, so the file is a random permutation of the items' order, and the requests of one item (its arms and runs) are not next to one another; the reader answers a file in its order and stops after five api_error responses in a row, which must mean a cause that every request shares, and never the requests of one item that fail together; keys.jsonl keeps the items' order",
+    "kept_on_the_host": "keys.jsonl, which maps each key to the item's id, arm, run and answer_type, and plan.json, beside the run directory's input/ and output/: the container is given input/, which holds requests.jsonl alone, read-only, and output/; the reader refuses a requests file that is not alone in its directory",
+    "never_sent": "the item's id, family, stratum, answer_type, proposal, corpus, as_of and every other field, and every other file of data/v0.1; the harness reads the item's proposal to choose the episodes, keeps it, and sends the episodes alone"
+  },
+  "prompts": {
+    "system": "Answer the question that follows. Reply with a JSON object whose \"answer\" field holds your answer in the form the question asks for.",
+    "user": "Context:\n\n{context}\n\nQuestion: {question}",
+    "context_description": "The context holds every recorded change to the file of the proposal the question names, oldest first: its full text when the file was created, then a unified diff for each later change, each with the time it was recorded and its commit message.",
+    "model_facing": "the system prompt, the user message's text around the context and the question, and the context description are the only text that the model receives besides the question and the context, and hold no benchmark-derived value: no item id, gold value, family name or stratum; the context is the proposal's own episodes as the stream holds them"
+  },
+  "context": {
+    "layout": "the context description, a blank line, and then the episodes, each as asofbench_systems.stream.render_episode renders it, joined by a line ---",
+    "episode": "{ref}: {kind} recorded at {recorded_at} in the {repo} repository, commit {commit}.\n\nCommit message:\n{message}\n\n{section}:\n{text}, where the section line names what the text holds: Full text of the file for a create, Unified diff of the file for a modify, and for a rename its diff against the file it moved from; a modify or rename whose diff is empty renders the section line and then a line that says so; a delete has no text and no section, and its body ends with the line The file was deleted.",
+    "proposal": "the item's proposal field, the proposal's id at S (such as PEP-8, EIP-1559 or ERC-20), which the harness keeps while the system sees only the question text; every F1, F2 and CF item names exactly one, and an ERC keeps one id across its EIP-repository and ERC-repository episodes",
+    "streams": {
+      "H+": "an H+ item reads the H+ stream (h-plus.jsonl)",
+      "H-": "an H- item reads the H- stream (h-minus.jsonl), whose episodes withhold the header lines of section 8",
+      "CF": "a CF item reads the counterfactual stream (cf.jsonl)",
+      "check": "the harness reads a stream only after checking its SHA-256 against the one that the build's MANIFEST.json registers for the arm, and records each stream's name and SHA-256 in plan.json"
+    },
+    "episodes": "every episode of the proposal that the stream holds, in the stream's order, those recorded after the item's date included: the harness never removes episodes by date",
+    "truncation": "none: the context is never cut. claude-haiku-5-5 and claude-sonnet-5-5 take 1M tokens, and a request over that limit fails at the API with an error of the request's own, not an infrastructure error, so the reader records it as that request's api_error response and its row has a null answer, which scores zero (section 12)",
+    "built": "once for each arm and proposal, by one reading of each stream (harness.long_contexts), however many runs and items name them"
+  },
+  "answering": {
+    "call": "asofbench_systems.answer.answer_once: one messages.create call for each request, without streaming, with the keyword arguments of asofbench_systems.answer.answering_settings and the one user message",
+    "model": "claude-haiku-5-5",
+    "sensitivity_check_model": "claude-sonnet-5-5, on the pilot items, scored in its own run",
+    "max_tokens": 32000,
+    "thinking": {
+      "type": "adaptive"
+    },
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "answer"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "not_sent": "no temperature, top_p or top_k, so the temperature is the default; no prefill (the one message is the user's); no tools, tool_choice or server tool; and no beta header",
+    "scorer_settings": "effort medium, adaptive thinking, default temperature",
+    "anthropic_client": "asofbench_systems.llm.make_async_client: anthropic.AsyncAnthropic with base_url https://api.anthropic.com given in code (ANTHROPIC_BASE_URL is never read), the key read from the Docker secret /run/secrets/anthropic_api_key only, the SDK's own httpx client honouring HTTPS_PROXY, max_retries 8, timeout 600 s",
+    "base_url": "https://api.anthropic.com",
+    "sdk": "anthropic 0.78.0, which sends anthropic-version 2023-06-01: the lowest release whose messages.create takes output_config's effort, the json_schema output format and adaptive thinking (0.77.1 has the format only), as reader/requirements.in records",
+    "usage_log": "asofbench_systems.usage.instrument wraps client.messages.create and records every call in usage.jsonl under the request's key, the invocation and attempt 1, each line with the model the call asked for and the model id the response named, which can be a dated snapshot of it"
+  },
+  "reply": {
+    "answer": "the answer field of the JSON object that the reply's text blocks hold, as it came (the harness shapes it); thinking blocks before it are passed over",
+    "tokens_in": "the response's input_tokens, cache_creation_input_tokens and cache_read_input_tokens, summed (0 for a call that raised)",
+    "tokens_out": "the response's output_tokens (0 for a call that raised)",
+    "wall_s": "the call's wall time in seconds, the SDK's retries included",
+    "tool_calls": 0,
+    "thinking_blocks": "the number of thinking blocks in the response, in each response line: adaptive thinking lets the model answer without thinking, so this records what it did",
+    "not_answered": {
+      "refusal": "a response with stop_reason refusal, whatever its text holds",
+      "max_tokens": "a response with stop_reason max_tokens, whatever its text holds",
+      "unparseable": "a reply whose text is not one JSON object with an answer field",
+      "api_error": "an API error, after the SDK's retries, that is the request's own, such as a 400, 404, 413 or 422"
+    },
+    "null_answer": "a request that was not answered has a response with a null answer and its error code, and its row has a null answer, which scores zero (section 12)"
+  },
+  "shaping": "the harness shapes each answer by the item's answer_type and does nothing else to it: for status, a string is kept, an integer becomes its decimal string, and anything else is kept as it came; for set, a list is kept, a string that parses as a JSON list is replaced by that list, and anything else is kept as it came; for count, an integer is kept, a string of ASCII digits with an optional leading minus sign is replaced by its integer, and anything else is kept as it came. A boolean is no integer. The scorer normalises the rest",
+  "rows": "harness.py rows writes one row per request, in keys.jsonl's order, with exactly the nine fields of section 12: id, system, arm, run, answer, tokens_in, tokens_out, wall_s and tool_calls; a key with no response, which a run that stopped and was not resumed leaves, gets a null answer and null costs, and rows exits 1",
+  "run": {
+    "concurrency": 8,
+    "max_retries": 8,
+    "timeout_s": 600.0,
+    "max_consecutive_api_errors": 5,
+    "order": "the requests file's order, read one line at a time, with 8 calls under way at once",
+    "infrastructure": "an infrastructure error stops the run with exit status 2 and writes no response for its request, so that a resumed run answers it: after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, InternalServerError, AuthenticationError or PermissionDeniedError, the classes that anthropic 0.78.0's client raises for these: InternalServerError for every 5xx, 503, 504 and 529 included, since that client has no branch of its own for 529; the shared table also names OverloadedError, which that client never raises), or the standard library's ConnectionError; the requests under way finish and keep their responses, and no other starts",
+    "consecutive_api_errors": "5 api_error responses in a row, in the order they are written, stop the run with exit status 3: each is its request's own error and stays, but so many in a row point at a cause that every request shares, such as a setting that the API rejects, which would give one to every request left; the requests under way finish and keep their responses, and no other starts. A resume answers only the requests that have no response, so a run that stopped this way for a cause of the run is discarded and run again in a new run directory once the cause is fixed, never resumed under changed settings; a resumed run counts on from the api_error responses at the end of the responses file",
+    "resume": "answer_requests --resume answers every request that has no response, after checking that the requests file, the responses file and the model are those that the run began with",
+    "lock": "every invocation holds the output directory's lock, run.lock, created with O_EXCL and touched every 30 s, and removes it at its end; a second invocation on the directory stops at once with exit status 2",
+    "exit_status": "0 when every request has a response with an answer; 1 when every request has a response and some of them have an error code; 2 when it is refused before it starts, the network check fails or an infrastructure error stops it; 3 when 5 api_error responses in a row stop it; 4 when it crashes, which run.json records with the exception's class"
+  },
+  "network_policy": {
+    "routes_out": [
+      {
+        "host": "api.anthropic.com",
+        "port": 443,
+        "through": "the egress proxy (env/egress, asofbench/egress) on the internal network, which opens a CONNECT tunnel to that host and port only and refuses everything else",
+        "for": "the answering model, claude-haiku-5-5, or claude-sonnet-5-5 in the sensitivity check"
+      }
+    ],
+    "proxy": {
+      "allow": "api.anthropic.com:443 (EGRESS_ALLOW in reader/compose.yaml)",
+      "idle_timeout_s": 660,
+      "idle_timeout": "EGRESS_IDLE_TIMEOUT in reader/compose.yaml: the proxy closes a tunnel that neither side has used for 660 s, a minute longer than the client's 600 s request timeout, since a non-streaming request receives nothing until its response begins; a request therefore ends at the client's timeout, never cut short by the proxy",
+      "limits": "the proxy's stated limits: it relays TLS uninspected, so it checks the host and port of the CONNECT request and never the server name (SNI) that the TLS handshake sends inside a tunnel to api.anthropic.com:443, which is therefore not checked against the CONNECT host; and it has no cap on concurrent connections",
+      "log": "one JSON line per request (ts, client, method, target, allowed, reason) and nothing of what passes through a tunnel; the operator saves it beside the run's outputs (systems/README.md)"
+    },
+    "services_inside": [],
+    "container": "the reader container is on the internal network only (internal, with no address of the host on it) and sees its runner and the shared package, the run's requests (input/, read-only at /input), its output directory (/output) and the API key as a Docker secret",
+    "unreachable": "data/v0.1, every file of this repository other than the reader's runner, the shared package and the network check, the harness's keys.jsonl and plan.json, the streams, the corpus clones, and the corpora's live sources (github.com/python/peps, github.com/ethereum/EIPs, github.com/ethereum/ERCs, peps.python.org, eips.ethereum.org and ercs.ethereum.org), their mirrors or a clone of them",
+    "provider_side_tools": "none: no request carries a tool, a server tool (web search, web fetch, code execution, file search or any other) or a tool_choice",
+    "checked_by": "env/netcheck.py, run by answer_requests before anything is answered, with the flags that every system gives it (asofbench_systems.run.NETCHECK_ARGS), no services and the mounts /input, /output and /run/secrets; it aborts the run on any failure, and its report is netcheck.json in the run's output directory"
+  },
+  "installed": {
+    "python": "3.12.16",
+    "base_image": "python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159",
+    "lock": "reader/requirements.txt, compiled from reader/requirements.in with hashes by uv 0.7.2; the image installs it hash-checked, from wheels only, and its build's self-test checks the installed packages against it",
+    "python_packages": {
+      "annotated-types": "0.8.0",
+      "anthropic": "0.78.0",
+      "anyio": "4.15.1",
+      "certifi": "2026.10.23",
+      "distro": "1.9.0",
+      "docstring-parser": "0.18.0",
+      "h11": "0.16.0",
+      "httpcore": "1.0.9",
+      "httpx": "0.28.1",
+      "idna": "3.20",
+      "iniconfig": "2.3.1",
+      "jiter": "0.18.0",
+      "packaging": "26.3",
+      "pluggy": "1.7.0",
+      "pydantic": "2.14.2",
+      "pydantic-core": "2.50.2",
+      "pygments": "2.21.0",
+      "pytest": "9.0.3",
+      "sniffio": "1.3.1",
+      "typing-extensions": "4.16.0",
+      "typing-inspection": "0.4.4"
+    },
+    "images": {
+      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/selftest.py), run with no network",
+      "asofbench/egress": "built from env/egress, on the base image above",
+      "per_run": "each run records the IDs of the two images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
+    }
+  }
+}

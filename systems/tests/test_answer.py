@@ -1,7 +1,7 @@
 """The answering call of every single-call entrant (common/asofbench_systems/answer.py): the
 request it sends, field by field, and how it reads the reply; the reader's run
 (reader/answer_requests.py) through the real client; and the image's self-test
-(reader/self_test.py) on this SDK. They need the anthropic package, so the root suite skips them.
+(reader/selftest.py) on this SDK. They need the anthropic package, so the root suite skips them.
 CI runs them with the SDK and httpx that the reader image's lock pins:
 
     uv run --frozen --extra dev --with anthropic==0.78.0 --with httpx==0.28.1 \\
@@ -38,8 +38,8 @@ USAGE = {"input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 
          "cache_read_input_tokens": 5}
 # A thinking block as Claude Haiku 5.5 returns it by default: its text omitted, its signature kept.
 THINKING = {"type": "thinking", "thinking": "", "signature": "bWFkZS11cA=="}
-# The registered strings and schema, as the plan's Global Constraints give them, so that an edit to
-# answer.py that changes what the model is sent fails here and not only in a comparison with itself.
+# The registered strings and schema, written out again here, so that an edit to answer.py that
+# changes what the model is sent fails here and not only in a comparison with itself.
 REGISTERED_SCHEMA = {
     "type": "object",
     "properties": {"answer": {"anyOf": [
@@ -303,9 +303,9 @@ def test_the_reader_answers_each_request_through_the_client_and_logs_its_usage(e
 
 def test_the_image_s_self_test_passes_on_this_sdk_and_fails_on_a_call_that_drifts(environment,
                                                                                  monkeypatch):
-    from reader import self_test
+    from reader import selftest
 
-    assert self_test.check_answering() == anthropic.__version__
+    assert selftest.check_answering() == anthropic.__version__
 
     async def drifting(client, model, question, context):
         # The registered settings with a sampling parameter and a beta header beside them.
@@ -318,7 +318,7 @@ def test_the_image_s_self_test_passes_on_this_sdk_and_fails_on_a_call_that_drift
 
     monkeypatch.setattr(answer, "answer_once", drifting)
     with pytest.raises(RuntimeError) as caught:
-        self_test.check_answering()
+        selftest.check_answering()
     assert str(caught.value) == ("the call differs from the registered settings in temperature; "
                                  "the call sends an anthropic-beta header")
 
@@ -328,17 +328,17 @@ def test_the_self_test_passes_on_a_lock_of_what_is_installed_and_fails_on_anothe
                                                                                   capsys):
     import importlib.metadata
 
-    from reader import self_test
+    from reader import selftest
 
     versions = {name: importlib.metadata.version(name) for name in ("anthropic", "httpx")}
     good = tmp_path / "requirements.txt"
     good.write_text("".join(f"{name}=={version} \\\n    --hash=sha256:{'0' * 64}\n"
                             for name, version in versions.items()), encoding="utf-8")
-    assert self_test.self_test(good) == 0
+    assert selftest.self_test(good) == 0
     assert capsys.readouterr().out.startswith(
         f"reader self-test: 2 packages as requirements.txt pins them, anthropic "
         f"{versions['anthropic']}; an answering call sends the registered settings")
     good.write_text("anthropic==0.0.1 \\\n    --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
-    assert self_test.self_test(good) == 1
+    assert selftest.self_test(good) == 1
     assert capsys.readouterr().err == (f"reader self-test: FAIL: anthropic is "
                                        f"{versions['anthropic']}, requirements.txt pins 0.0.1\n")

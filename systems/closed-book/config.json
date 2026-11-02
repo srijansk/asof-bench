@@ -9,6 +9,7 @@
       "question"
     ],
     "key": "a random UUID4 for each item, arm and run, which says nothing of the item and is never the same twice",
+    "order": "ascending key order: the keys are random UUID4s, so the file is a random permutation of the items' order, and the requests of one item (its arms and runs) are not next to one another; the reader answers a file in its order and stops after five api_error responses in a row, which must mean a cause that every request shares, and never the requests of one item that fail together; keys.jsonl keeps the items' order",
     "kept_on_the_host": "keys.jsonl, which maps each key to the item's id, arm, run and answer_type, and plan.json, beside the run directory's input/ and output/: the container is given input/, which holds requests.jsonl alone, read-only, and output/; the reader refuses a requests file that is not alone in its directory",
     "never_sent": "the item's id, family, stratum, answer_type, proposal, as_of and every other field, and every other file of data/v0.1"
   },
@@ -149,7 +150,7 @@
       "typing-inspection": "0.4.4"
     },
     "images": {
-      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/self_test.py), run with no network",
+      "asofbench/reader": "built from reader/Dockerfile with systems/ as the context, on the base image above; the build ends with answer_requests --self-test (reader/selftest.py), run with no network",
       "asofbench/egress": "built from env/egress, on the base image above",
       "per_run": "each run records the IDs of the two images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json"
     }

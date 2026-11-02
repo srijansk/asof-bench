@@ -1,15 +1,17 @@
 """How the reader is put together: its Dockerfile's list of the reader's and the shared package's
 files against the ones that its runner and its self-test import, and the rest of the image as
-the first plan builds Graphiti's; the self-test's check of the installation against a lock; its
+Graphiti's is built; the self-test's check of the installation against a lock; its
 compose file (the egress service as Graphiti's, the reader on the internal network only, its two
 mounts and the key as a Docker secret); its network check (the shared flags, no services, its
-mounts, after the proxy accepts connections); its lock; closed book's config.json against the
-code it records; and the CI step that runs the answering tests with the SDK that the lock pins.
-Standard library only, with packaging, which pytest installs."""
+mounts, after the proxy accepts connections); its lock; the config.json of each single-call
+entrant (closed book, long context and the oracle) against the code it records; that no module
+outside the tests is one that pytest collects; and the CI step that runs the answering tests with
+the SDK that the lock pins. Standard library only, with packaging, which pytest installs."""
 
 from __future__ import annotations
 
 import ast
+import fnmatch
 import importlib.metadata
 import json
 import re
@@ -27,12 +29,12 @@ from image_files import (
     shared_files_needed,
 )
 from reader import answer_requests as reader
-from reader import self_test
+from reader import selftest
 
 SYSTEMS = Path(__file__).resolve().parents[1]
 READER = SYSTEMS / "reader"
 PACKAGE = SYSTEMS / "common" / "asofbench_systems"
-CONFIG = SYSTEMS / "closed-book" / "config.json"
+ENTRANTS = ("closed-book", "long-context", "oracle")
 PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)[ \t]*(;[^\\\n]*)?", re.M)
 
 
@@ -88,7 +90,7 @@ def reader_files_needed(entry: Path) -> set[str]:
 def test_the_image_copies_the_files_that_the_runner_and_its_self_test_import_and_no_others():
     own = reader_files_needed(READER / "answer_requests.py")
     # The runner imports its self-test (for --self-test), which imports the runner back.
-    assert own == {"answer_requests.py", "self_test.py"}
+    assert own == {"answer_requests.py", "selftest.py"}
     dockerfile = (READER / "Dockerfile").read_text(encoding="utf-8")
     assert copied_python_files(dockerfile, "reader") == own
     needed = shared_files_needed([READER / name for name in sorted(own)], PACKAGE)
@@ -116,15 +118,15 @@ def test_the_self_test_checks_every_pin_for_this_platform_against_what_is_instal
         # A pin for another platform than this one, which is not installed here.
         "colorama==0.4.6 ; sys_platform == 'win32'" if sys.platform != "win32"
         else "uvloop==0.21.0 ; sys_platform != 'win32'"])
-    assert self_test.check_installation(good) == installed
+    assert selftest.check_installation(good) == installed
     wrong = write_lock(tmp_path / "wrong.txt", [f"pytest=={installed['pytest']}",
                                                 "packaging==0.0.1", "not-a-package-here==1.0"])
     with pytest.raises(RuntimeError) as caught:
-        self_test.check_installation(wrong)
+        selftest.check_installation(wrong)
     assert str(caught.value) == (f"packaging is {installed['packaging']}, wrong.txt pins 0.0.1; "
                                  "not-a-package-here is None, wrong.txt pins 1.0")
     with pytest.raises(RuntimeError, match="empty.txt pins no package"):
-        self_test.check_installation(write_lock(tmp_path / "empty.txt", []))
+        selftest.check_installation(write_lock(tmp_path / "empty.txt", []))
 
 
 def test_the_self_test_fails_when_the_network_check_is_not_where_the_runner_looks(tmp_path,
@@ -132,7 +134,7 @@ def test_the_self_test_fails_when_the_network_check_is_not_where_the_runner_look
     good = write_lock(tmp_path / "good.txt", [f"pytest=={importlib.metadata.version('pytest')}"])
     monkeypatch.setattr(reader, "NETCHECK_SCRIPT", tmp_path / "env" / "netcheck.py")
     with pytest.raises(RuntimeError) as caught:
-        self_test.check_installation(good)
+        selftest.check_installation(good)
     assert str(caught.value) == f"the network check is not at {tmp_path / 'env' / 'netcheck.py'}"
 
 
@@ -146,7 +148,7 @@ def test_the_image_is_built_as_graphiti_s_is():
             in dockerfile)
     assert "COPY reader/requirements.txt /app/requirements.txt\n" in dockerfile
     assert "COPY env/netcheck.py /app/env/netcheck.py\n" in dockerfile
-    assert "COPY reader/answer_requests.py reader/self_test.py /app/reader/\n" in dockerfile
+    assert "COPY reader/answer_requests.py reader/selftest.py /app/reader/\n" in dockerfile
     # The runner's own user, and a self-test with no network through the command every run uses.
     assert "useradd --system --uid 10001 --gid 10001" in dockerfile
     assert "\nUSER 10001:10001\n" in dockerfile
@@ -154,7 +156,7 @@ def test_the_image_is_built_as_graphiti_s_is():
         "\nRUN --network=none answer_requests --self-test\n")
     assert 'exec python -m reader.answer_requests "$@"' in dockerfile
     # The paths the self-test finds the lock and the network check at, in the image's layout.
-    assert self_test.REQUIREMENTS == READER.parent / "requirements.txt"
+    assert selftest.REQUIREMENTS == READER.parent / "requirements.txt"
     assert reader.NETCHECK_SCRIPT == SYSTEMS / "env" / "netcheck.py"
     assert reader.NETCHECK_SCRIPT.is_file()
 
@@ -228,14 +230,17 @@ def test_the_lock_pins_the_registered_sdk_with_hashes_for_every_package():
             "--exclude-newer 2026-11-01T00:00:00Z -o requirements.txt") in text.splitlines()[1]
 
 
-def test_closed_book_s_config_records_the_settings_that_the_code_sends():
-    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+@pytest.mark.parametrize("system", ENTRANTS)
+def test_each_single_call_entrant_s_config_records_the_settings_that_the_code_sends(system):
+    config_path = SYSTEMS / system / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     settings = answer.answering_settings(answer.MODELS[0])
-    assert (config["system"], config["inputs"]) == ("closed-book",
-                                                    "the question text and nothing else")
+    assert config["system"] == system
+    with_context = system != "closed-book"
     assert config["prompts"]["system"] == answer.SYSTEM_PROMPT == settings["system"]
-    assert config["prompts"]["user"] == answer.user_message("{question}", None) == (
-        "Question: {question}")
+    # The user message, with the context after its label when the entrant has one.
+    assert config["prompts"]["user"] == answer.user_message(
+        "{question}", "{context}" if with_context else None)
     recorded = config["answering"]
     assert (recorded["model"], recorded["max_tokens"], recorded["thinking"],
             recorded["output_config"]) == (settings["model"], settings["max_tokens"],
@@ -244,7 +249,8 @@ def test_closed_book_s_config_records_the_settings_that_the_code_sends():
     assert recorded["sensitivity_check_model"].startswith(answer.MODELS[1])
     assert recorded["base_url"] == llm.BASE_URL
     assert recorded["scorer_settings"] == "effort medium, adaptive thinking, default temperature"
-    assert config["requests"]["fields"] == ["key", "question"]
+    assert config["requests"]["fields"] == (["key", "question", "context"] if with_context
+                                            else ["key", "question"])
     assert set(config["reply"]["not_answered"]) == set(answer.ERRORS)
     assert (config["run"]["concurrency"], config["run"]["max_retries"],
             config["run"]["timeout_s"], config["run"]["max_consecutive_api_errors"]) == (
@@ -262,14 +268,39 @@ def test_closed_book_s_config_records_the_settings_that_the_code_sends():
     (base,) = re.findall(r"^FROM (\S+) AS deps$", (READER / "Dockerfile").read_text(
         encoding="utf-8"), re.M)
     assert installed["base_image"] == base
+    # The same image runs all three entrants: what is installed and how the run behaves are the
+    # closed book's, word for word, and so are the settings every answering call sends.
+    closed = json.loads((SYSTEMS / "closed-book" / "config.json").read_text(encoding="utf-8"))
+    for section in ("answering", "run", "network_policy", "installed", "reply", "shaping", "rows"):
+        assert config[section] == closed[section], section
+    assert config["prompts"]["system"] == closed["prompts"]["system"]
+    # Every entrant's requests are written in ascending key order.
+    assert "ascending key order" in config["requests"]["order"]
     # No local path, and the registered scorer settings where the scorer is installed.
-    text = CONFIG.read_text(encoding="utf-8")
+    text = config_path.read_text(encoding="utf-8")
     assert str(SYSTEMS.parent.resolve()) not in text and str(Path.home()) not in text
     try:
         from asofbench.scoring import REGISTERED_ANSWERING_SETTINGS
     except ImportError:
         return
     assert recorded["scorer_settings"] == REGISTERED_ANSWERING_SETTINGS
+
+
+def test_closed_book_s_inputs_are_the_question_and_nothing_else():
+    config = json.loads((SYSTEMS / "closed-book" / "config.json").read_text(encoding="utf-8"))
+    assert config["inputs"] == "the question text and nothing else"
+
+
+def test_no_module_outside_the_tests_is_one_that_pytest_collects():
+    # pytest imports a file named test_*.py or *_test.py wherever `pytest systems` finds it (the
+    # reader's self-test was self_test.py, which it imported before the tests' conftest.py had
+    # put the shared package on the path).
+    collected = ("test_*.py", "*_test.py")
+    found = [path.relative_to(SYSTEMS) for path in SYSTEMS.rglob("*.py")
+             if "tests" not in path.relative_to(SYSTEMS).parts[:1]
+             and "__pycache__" not in path.parts
+             and any(fnmatch.fnmatch(path.name, pattern) for pattern in collected)]
+    assert found == []
 
 
 def test_ci_runs_the_answering_tests_with_the_sdk_and_httpx_that_the_lock_pins():

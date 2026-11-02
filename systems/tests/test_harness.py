@@ -90,10 +90,15 @@ def test_closed_book_is_asked_every_item_in_every_arm_it_lists_three_times(toy, 
     expected = [(q["id"], arm, run) for q in questions for arm in q["arms"] for run in (1, 2, 3)]
     assert [(k["id"], k["arm"], k["run"]) for k in keys] == expected
     assert len(requests) == len(expected) == sum(len(q["arms"]) for q in questions) * 3
-    # keys.jsonl maps every key back, in the requests' order, with the item's answer type.
+    # keys.jsonl maps every key back, with the item's answer type, and keeps the items' order; the
+    # requests are in ascending key order, a random permutation of it, so that one item's requests
+    # are not next to each other.
     by_id = {q["id"]: q for q in questions}
-    assert [r["key"] for r in requests] == [k["key"] for k in keys]
-    for request, key in zip(requests, keys, strict=True):
+    by_key = {k["key"]: k for k in keys}
+    assert [r["key"] for r in requests] == sorted(by_key)
+    assert [r["key"] for r in requests] != [k["key"] for k in keys]
+    for request in requests:
+        key = by_key[request["key"]]
         assert list(key) == ["key", "id", "arm", "run", "answer_type"]
         assert key["answer_type"] == by_id[key["id"]]["answer_type"]
         assert request == {"key": key["key"], "question": by_id[key["id"]]["question"]}
@@ -296,6 +301,35 @@ def test_the_rows_score_as_an_outside_entry_on_the_toy_data(toy, questions, tmp_
     assert report["answers"]["missing_runs"] == [] and report["unknown_ids"] == []
     assert report["accounting"]["closed-book-toy"]["without"] == 0
     assert all(cell["answered"] == cell["asked"] for cell in report["coverage"])
+
+
+def test_the_hint_for_a_key_with_no_response_depends_on_how_the_run_stopped(toy, tmp_path,
+                                                                                capsys):
+    run_dir = tmp_path / "run"
+    assert make_requests(toy, run_dir, "--items", str(toy / "toy-data" / "pilot.json")) == 0
+    keys = [k["key"] for k in lines(run_dir / "keys.jsonl")]
+    answers = dict.fromkeys(keys[:-3], "Draft")
+
+    def hint(*invocations: dict) -> str:
+        respond(run_dir, answers, invocations=list(invocations))
+        out = tmp_path / f"answers-{len(list(tmp_path.glob('answers-*')))}.jsonl"
+        assert make_rows(run_dir, out) == 1 and out.exists()
+        return capsys.readouterr().err
+
+    # An infrastructure stop (exit 2), a crash (4), or a kill that left no exit: the run resumes.
+    for invocation in ({"command": "answer", "exit": 2}, {"command": "answer", "exit": 4},
+                       {"command": "answer", "exit": None}):
+        said = hint(invocation)
+        assert "3 of the" in said and "resume it, then write the rows again" in said
+        assert "discard" not in said
+    # Five api_error responses in a row (exit 3): each response is its request's own, but the
+    # cause is the run's, so the run is discarded and run again in a fresh run directory, and a
+    # resume is not offered. Only the run's last invocation says how it stopped.
+    said = hint({"command": "answer", "exit": 2}, {"command": "answer", "exit": 3})
+    assert "3 of the" in said and "stopped with exit status 3" in said
+    assert "discard the run and run it again in a fresh run directory" in said
+    assert "resume" not in said.replace("never resume it", "")
+    assert "never resume it" in said
 
 
 def test_rows_refuses_responses_it_cannot_place(toy, tmp_path):

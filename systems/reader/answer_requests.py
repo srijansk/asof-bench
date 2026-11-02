@@ -69,7 +69,7 @@ error stops it; 3 when consecutive ``api_error`` responses stop it; 4 when it cr
 run.json records with the exception's class.
 
 ``answer_requests --self-test``, which the image's build runs with no network, is the image's
-self-test (``reader.self_test``): the installed packages are those that the lock pins, and an
+self-test (``reader.selftest``): the installed packages are those that the lock pins, and an
 answering call through the installed SDK sends the registered settings and nothing else.
 """
 
@@ -373,9 +373,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         if args.requests or args.out or args.model or args.resume:
             parser.error("--self-test takes no other argument")
-        from reader import self_test
+        from reader import selftest
 
-        return self_test.self_test()
+        return selftest.self_test()
     if missing := [flag for flag, value in (("--requests", args.requests), ("--out", args.out),
                                             ("--model", args.model)) if value is None]:
         parser.error(f"the following arguments are required: {', '.join(missing)}")

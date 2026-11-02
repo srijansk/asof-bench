@@ -34,7 +34,7 @@ COPY common/asofbench_systems/__init__.py common/asofbench_systems/answer.py \
      common/asofbench_systems/llm.py common/asofbench_systems/run.py \
      common/asofbench_systems/usage.py /app/asofbench_systems/
 COPY env/netcheck.py /app/env/netcheck.py
-COPY reader/answer_requests.py reader/self_test.py /app/reader/
+COPY reader/answer_requests.py reader/selftest.py /app/reader/
 RUN printf '#!/bin/sh\nexec python -m reader.answer_requests "$@"\n' > /usr/local/bin/answer_requests \
     && chmod 755 /usr/local/bin/answer_requests
 
@@ -42,7 +42,7 @@ ENV PYTHONPATH=/app
 WORKDIR /app
 USER 10001:10001
 
-# The self-test (self_test.py) runs with no network at all, through the command that every run
+# The self-test (selftest.py) runs with no network at all, through the command that every run
 # uses: it imports every module the runner imports, the SDK and httpx among them, checks that the
 # installed packages are the ones requirements.txt pins and that the network check is in place,
 # and makes one answering call through the installed SDK to an httpx MockTransport, which must

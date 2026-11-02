@@ -4,21 +4,27 @@ answers, and turns the container's responses into answer rows.
 
     uv run python systems/harness.py requests --system closed-book --data data/v0.1 \\
         --out-dir <run dir> [--items <file>] [--runs 1,2,3]
+    uv run python systems/harness.py requests --system long-context|oracle --data data/v0.1 \\
+        --streams-dir streams --out-dir <run dir> [--items <file>] [--runs 1,2,3]
 
 reads the build's questions.jsonl, after checking it against the SHA-256 that the build's
 MANIFEST.json registers, and writes a new run directory, outside the repository:
 
 - ``input/requests.jsonl``: one request per item, arm and run that the system is asked, each a
   JSON line with ``key``, a random UUID4 that says nothing of the item, and ``question``, the
-  item's question text, and nothing else (long context and the oracle add ``context``). The
-  ``input`` directory holds nothing else: it is what the system's container is given, read-only
-  at /input;
+  item's question text, and nothing else (long context and the oracle add ``context``). The file
+  is in ascending key order, which for random keys is a random permutation of the items' order,
+  so that one item's requests are not next to one another: the reader answers a file in order
+  and stops after a run of ``api_error`` responses, which must mean a cause that every request
+  shares, and not one item whose context is over the model's window. The ``input`` directory
+  holds nothing else: it is what the system's container is given, read-only at /input;
 - ``output/``, empty, where the container writes its responses (mounted at /output);
-- ``keys.jsonl``: one line per request, in the same order, with ``key``, ``id``, ``arm``, ``run``
-  and ``answer_type``, which never leave the host;
+- ``keys.jsonl``: one line per request, in the items' order (the questions', then the arms', then
+  the runs'), with ``key``, ``id``, ``arm``, ``run`` and ``answer_type``, which never leave the
+  host;
 - ``plan.json``: the system, the runs, the number of requests and their counts per arm, family
-  and run, and the name and SHA-256 of each file they come from (questions.jsonl, MANIFEST.json
-  and the items file) and of requests.jsonl and keys.jsonl.
+  and run, and the name and SHA-256 of each file they come from (questions.jsonl, MANIFEST.json,
+  the items file and the arms' streams that were read) and of requests.jsonl and keys.jsonl.
 
 requests.jsonl and keys.jsonl are written under temporary names and renamed only after plan.json
 is written, keys.jsonl first and requests.jsonl last, so that an interrupted invocation leaves no
@@ -29,6 +35,28 @@ with no entries file, section 12): closed book, the oracle and grep at D every i
 its ``arms`` field lists, and long context only the F1, F2 and CF items. ``--items``, a list of
 item ids or pilot.json's structure, read as ``asofbench score --items`` reads it, limits them to a
 pilot's items, and ``--runs`` (by default 1,2,3) to some of the three runs.
+
+**Contexts.** Closed book receives the question alone. Long context and the oracle receive a
+``context`` as well, which the harness builds on the host from the arms' streams, ``--streams-dir``
+(a directory holding the generator's files h-plus.jsonl, h-minus.jsonl and cf.jsonl; closed book
+is given none). A stream is read only after its SHA-256 is checked against the one that the
+build's manifest registers for the arm, and every stream and every context is built before the
+run directory is made, so that a stream the harness refuses leaves nothing behind. A context
+begins with a description of itself (``LONG_CONTEXT_DESCRIPTION``, ``ORACLE_DESCRIPTION``), a
+blank line following it:
+
+- long context (``long_context``): every episode of the proposal that the item names, in the
+  item's arm's stream (H+, H- or CF), in stream order, those recorded after the item's date
+  included, each as ``asofbench_systems.stream.render_episode`` renders it, joined by a line
+  ``---``. Nothing is cut: a request over the model's window fails at the API as that request's
+  own ``api_error`` and gets a null answer. Each stream is read once for all its proposals;
+- the oracle (``oracle_statements``): one line for every proposal of the item's corpus that has a
+  file at the end of the item's date, in ascending number, ``{proposal}: status {status};
+  requires {list or -}; replaces {list or -}; superseded-by {list or -}``, from the file's header
+  as recorded (``statement``). The files come from ``asofbench.materialize.replay`` of the H+
+  stream for H+ and H- items, which the oracle reads as recorded in both arms, and of the CF
+  stream for CF items. Each stream is replayed once for all its dates, and each distinct
+  (stream, corpus, date) is computed once.
 
     uv run python systems/harness.py rows --system closed-book --run-dir <run dir> \\
         --out <answers.jsonl>
@@ -41,9 +69,10 @@ row per key, in keys.jsonl's order, with the nine fields of section 12 and no ot
 (``shape``). A request that the system could not answer has a response with a null answer, and so
 has its row. A key with no response at all, which a run that stopped and was not resumed leaves,
 gets a row with a null answer and null cost fields, which scores zero, and rows says how many and
-exits 1: resume the run first. ``--system`` is the name the rows carry, the system that the
-requests were written for or an outside entry's name, such as a toy run's, that no registered
-system has.
+exits 1: after a stop with exit status 2 (or 4) resume the run first, and after one with exit
+status 3 (``api_error`` responses in a row) discard it and run it again in a fresh run directory,
+never resuming it. ``--system`` is the name the rows carry, the system that the requests were
+written for or an outside entry's name, such as a toy run's, that no registered system has.
 
 Exit status: 0 when the requests, or the rows, are written; 1 when rows wrote rows for keys with
 no response; 2, with the reason, when an input is refused (one that cannot be read among them),
@@ -57,13 +86,15 @@ path, since nothing installs ``asofbench_systems`` on the host.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
 import traceback
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterator
+from datetime import date
 from pathlib import Path
 from typing import TypeVar
 
@@ -76,6 +107,7 @@ from asofbench_systems.run import (  # noqa: E402
     EXIT_CRASHED,
     EXIT_DONE,
     EXIT_FAILED,
+    EXIT_FAILURES,
     EXIT_STOPPED,
     RUN,
     Refused,
@@ -85,8 +117,12 @@ from asofbench_systems.run import (  # noqa: E402
     write_json,
     write_text_atomically,
 )
+from asofbench_systems.stream import read_episodes, render_episode  # noqa: E402
 
-from asofbench import scoring  # noqa: E402
+from asofbench import headers, materialize, scoring  # noqa: E402
+from asofbench.corpora import REPOS  # noqa: E402
+from asofbench.manifest import ManifestError, registered_stream  # noqa: E402
+from asofbench.stream import STREAM_FILES  # noqa: E402
 
 INPUT, OUTPUT = "input", "output"
 REQUESTS, KEYS, PLAN = "requests.jsonl", "keys.jsonl", "plan.json"
@@ -96,13 +132,16 @@ KEY_FIELDS = ("key", "id", "arm", "run", "answer_type")
 ROW_FIELDS = ("id", "system", "arm", "run", "answer", "tokens_in", "tokens_out", "wall_s",
               "tool_calls")
 COSTS = ROW_FIELDS[5:]
-QUESTION_FIELDS = ("id", "question", "family", "answer_type", "arms")
+# What a question record holds that the harness reads: the item's id, its question, its family and
+# answer type, the arms that ask it, and the proposal it names (None for an F5 item), its corpus and
+# its date, which only the context builders use.
+QUESTION_FIELDS = ("id", "question", "family", "answer_type", "arms", "corpus", "proposal",
+                   "as_of")
+CORPORA = ("pep", "eth")
 RUNS = (1, 2, 3)
-# The systems whose requests the harness writes, each with the function that gives a request its
-# context, or None for a system that receives the question alone (closed book).
-CONTEXTS = {"closed-book": None}
 # A count written as a string: ASCII digits, after an optional minus sign.
 COUNT = re.compile(r"-?[0-9]+")
+DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 T = TypeVar("T")
 
 
@@ -176,9 +215,21 @@ def parse_runs(text: str) -> tuple[int, ...]:
     return tuple(sorted(int(word) for word in words))
 
 
-def read_questions(data: Path) -> tuple[list[dict], dict, dict]:
+def is_day(value) -> bool:
+    """Whether ``value`` is a date written YYYY-MM-DD."""
+    if not isinstance(value, str) or not DAY.fullmatch(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def read_questions(data: Path) -> tuple[list[dict], dict, dict, dict]:
     """The build's questions, in file order, after checking questions.jsonl against the SHA-256
-    that the build's MANIFEST.json registers; with each file's name and SHA-256."""
+    that the build's MANIFEST.json registers; with each file's name and SHA-256, and the
+    manifest."""
     manifest = load_json(data / MANIFEST)
     entry = (manifest.get("files") or {}).get(QUESTIONS)
     registered = entry.get("sha256") if isinstance(entry, dict) else None
@@ -193,13 +244,15 @@ def read_questions(data: Path) -> tuple[list[dict], dict, dict]:
     for number, q in enumerate(questions, 1):
         if (not isinstance(q, dict) or any(name not in q for name in QUESTION_FIELDS)
                 or not isinstance(q["question"], str) or not q["question"]
-                or q["answer_type"] not in ("status", "set", "count")):
+                or q["answer_type"] not in ("status", "set", "count")
+                or q["corpus"] not in CORPORA or not is_day(q["as_of"])
+                or not (q["proposal"] is None or isinstance(q["proposal"], str))):
             raise Refused(f"{QUESTIONS}: line {number} is not a question")
         if q["id"] in ids:
             raise Refused(f"{QUESTIONS}: line {number}'s id occurs twice")
         ids.add(q["id"])
     return (questions, {"file": QUESTIONS, "sha256": actual},
-            {"file": MANIFEST, "sha256": read_input(sha256_file, data / MANIFEST)})
+            {"file": MANIFEST, "sha256": read_input(sha256_file, data / MANIFEST)}, manifest)
 
 
 def read_items(path: Path, questions: list[dict]) -> tuple[frozenset[str], dict]:
@@ -216,6 +269,211 @@ def read_items(path: Path, questions: list[dict]) -> tuple[frozenset[str], dict]
                    "ids": len(items)}
 
 
+# --- the context builders of long context and the oracle (section 11) -------------------------
+
+# The first line of each context: what the context holds, in the words the registration gives the
+# entrant. A line of its own follows (a blank one), and then the context itself.
+LONG_CONTEXT_DESCRIPTION = (
+    "The context holds every recorded change to the file of the proposal the question names, "
+    "oldest first: its full text when the file was created, then a unified diff for each later "
+    "change, each with the time it was recorded and its commit message.")
+ORACLE_DESCRIPTION = (
+    "The context lists every proposal of the question's corpus present at the end of the "
+    "question's date, with its status and its requires, replaces and superseded-by lists as its "
+    "file's header recorded them then.")
+# Joins the episodes of a long context, as a line of its own; and what stands for a status or a
+# list that the header does not give.
+EPISODE_SEPARATOR = "\n---\n"
+NOTHING = "-"
+
+
+@contextlib.contextmanager
+def reading(path: Path) -> Iterator[None]:
+    """The reading of the stream file at ``path``, in which every error that the file can cause
+    (it cannot be read, is not UTF-8 text, or holds a line or an episode that is not one) is
+    Refused, by the file's name. Nothing else belongs inside it: a mistake of the harness's own is
+    no refused input."""
+    try:
+        yield
+    except OSError as error:
+        raise Refused(f"{path.name} cannot be read ({error.strerror or type(error).__name__})"
+                      ) from None
+    except UnicodeDecodeError:
+        raise Refused(f"{path.name} is not UTF-8 text") from None
+    except materialize.MaterializeError as error:
+        raise Refused(str(error)) from None
+    except KeyError as error:
+        raise Refused(f"{path.name}: an episode lacks the field {error}") from None
+    except ValueError as error:
+        raise Refused(f"{path.name}: {str(error).removeprefix(f'{path}: ')}") from None
+
+
+def long_contexts(stream_path: Path, proposals: Collection[str]) -> dict[str, str]:
+    """The long context of each of ``proposals`` (ids at S, such as ``PEP-8``) in the stream at
+    ``stream_path``, by one reading of the stream: the first line is
+    ``LONG_CONTEXT_DESCRIPTION``, a blank line follows, and then every episode of the proposal that
+    the stream holds, those recorded after the item's date included, in the stream's order, each as
+    ``render_episode`` renders it, joined by a line ``---``. Nothing is cut, however long. Refused
+    for a proposal with no episode in the stream."""
+    rendered: dict[str, list[str]] = {proposal: [] for proposal in proposals}
+    with reading(stream_path):
+        for episode in read_episodes(str(stream_path)):
+            found = rendered.get(episode["proposal"])
+            if found is not None:
+                found.append(render_episode(episode))
+    for proposal, pieces in rendered.items():
+        if not pieces:
+            raise Refused(f"{stream_path.name} holds no episode of {proposal}")
+    return {proposal: f"{LONG_CONTEXT_DESCRIPTION}\n\n{EPISODE_SEPARATOR.join(pieces)}"
+            for proposal, pieces in rendered.items()}
+
+
+def long_context(stream_path: Path, proposal: str) -> str:
+    """The long context of ``proposal`` in the stream at ``stream_path`` (``long_contexts``)."""
+    return long_contexts(stream_path, [proposal])[proposal]
+
+
+def number_of(proposal: str) -> int:
+    """The number of a proposal id such as ``PEP-8`` or ``ERC-20``."""
+    return int(proposal.rpartition("-")[2])
+
+
+def listed(numbers: list[int]) -> str:
+    return ", ".join(map(str, numbers)) or NOTHING
+
+
+def statement(proposal: str, family: str, text: str) -> str:
+    """The oracle's line for ``proposal``, whose file reads ``text``: its status as the header
+    records it, and its requires, replaces and superseded-by lists, each as comma-separated
+    numbers or ``-`` when the header gives none. The status is the header's own value, not
+    normalised; requires is the requires field (``headers.number_list``), replaces the Replaces
+    field, and superseded-by the Superseded-By field and, under its pre-2011 PEP name, Replaced-By
+    (``headers.superseders``). Ethereum headers rarely have the last two, and then read ``-``."""
+    header = headers.parse_header(family, text)
+    return (f"{proposal}: status {header.get('status') or NOTHING}; "
+            f"requires {listed(headers.number_list(header.get('requires')))}; "
+            f"replaces {listed(headers.number_list(header.get('replaces')))}; "
+            f"superseded-by {listed(headers.superseders(header))}")
+
+
+def statements(files: dict[tuple[str, str], str], corpus: str) -> str:
+    """The oracle's context for the files of one day (``(repo, proposal) -> text``, as
+    ``materialize.replay`` gives them): the first line is ``ORACLE_DESCRIPTION``, a blank line
+    follows, and then one ``statement`` for every proposal of ``corpus`` that has a file, in
+    ascending number."""
+    present = sorted((key for key in files if REPOS[key[0]].family == corpus),
+                     key=lambda key: (number_of(key[1]), key[1]))
+    return f"{ORACLE_DESCRIPTION}\n\n" + "\n".join(
+        statement(proposal, corpus, files[repo, proposal]) for repo, proposal in present)
+
+
+def replayed(stream_path: Path, days: Collection[date]
+             ) -> Iterator[tuple[date, dict[tuple[str, str], str]]]:
+    """Each of ``days``, in date order, with the files as of its end, ``(repo, proposal) -> text``:
+    ``asofbench.materialize.replay`` of the stream at ``stream_path``, which Refused tells apart
+    from the harness's own errors (``reading``)."""
+    with reading(stream_path), open(stream_path, encoding="utf-8", newline="\n") as lines:
+        yield from materialize.replay(lines, days, where=stream_path.name)
+
+
+def oracle_contexts(stream_path: Path, wanted: Collection[tuple[str, date]]
+                    ) -> dict[tuple[str, date], str]:
+    """The oracle's context for each ``(corpus, day)`` of ``wanted``, in the stream at
+    ``stream_path``, which one replay of it (``asofbench.materialize.replay``) serves for all of
+    them: the proposals that its files hold at the end of ``day`` (the episodes recorded by
+    ``day`` 23:59:59 UTC, applied in stream order, a deleted proposal gone and one not yet created
+    not there), as ``statements`` lists them."""
+    corpora: dict[date, list[str]] = {}
+    for corpus, day in sorted(wanted):
+        corpora.setdefault(day, []).append(corpus)
+    found: dict[tuple[str, date], str] = {}
+    if not corpora:
+        return found
+    for day, files in replayed(stream_path, corpora):
+        for corpus in corpora[day]:
+            found[corpus, day] = statements(files, corpus)
+    return found
+
+
+def oracle_statements(stream_path: Path, corpus: str, day: date) -> str:
+    """The oracle's context for ``corpus`` at the end of ``day``, in the stream at
+    ``stream_path`` (``oracle_contexts``)."""
+    return oracle_contexts(stream_path, {(corpus, day)})[corpus, day]
+
+
+def stream_arm(system: str, arm: str) -> str:
+    """The arm whose stream gives ``system`` its context for an item asked in ``arm``: long
+    context reads the item's own arm's stream, and the oracle the headers as recorded (the H+
+    stream) in H+ and H-, and the counterfactual stream's in CF (section 11)."""
+    return "H+" if system == "oracle" and arm != "CF" else arm
+
+
+def long_context_builder(planned: list[tuple[dict, str, int]], streams: dict[str, Path]
+                         ) -> Callable[[dict, str], str]:
+    """The function that gives a request of long context its context, from the planned items and
+    the paths of the streams of their arms: each stream is read once, for all of its proposals."""
+    wanted: dict[str, set[str]] = {}
+    for q, arm, _ in planned:
+        if q["proposal"] is None:
+            raise Refused(f"{q['id']} names no proposal, so long context has nothing to read "
+                          "for it")
+        wanted.setdefault(arm, set()).add(q["proposal"])
+    contexts = {arm: long_contexts(streams[arm], proposals) for arm, proposals in wanted.items()}
+
+    def context_of(q: dict, arm: str) -> str:
+        return contexts[arm][q["proposal"]]
+
+    return context_of
+
+
+def oracle_builder(planned: list[tuple[dict, str, int]], streams: dict[str, Path]
+                   ) -> Callable[[dict, str], str]:
+    """The function that gives a request of the oracle its context, from the planned items and the
+    paths of the streams it reads: each stream is replayed once, and each distinct corpus and date
+    that its items ask is computed once."""
+    wanted: dict[str, set[tuple[str, date]]] = {}
+    for q, arm, _ in planned:
+        wanted.setdefault(stream_arm("oracle", arm), set()).add(
+            (q["corpus"], date.fromisoformat(q["as_of"])))
+    contexts = {arm: oracle_contexts(streams[arm], days) for arm, days in wanted.items()}
+
+    def context_of(q: dict, arm: str) -> str:
+        return contexts[stream_arm("oracle", arm)][q["corpus"], date.fromisoformat(q["as_of"])]
+
+    return context_of
+
+
+# The systems whose requests the harness writes, each with the function that builds, from the
+# planned items and the paths of the streams it reads, the function that gives a request its
+# context; or None for a system that receives the question alone (closed book).
+CONTEXTS = {"closed-book": None, "long-context": long_context_builder, "oracle": oracle_builder}
+
+
+def registered_streams(arms: Collection[str], streams_dir: Path, manifest: dict,
+                       manifest_path: Path) -> dict[str, tuple[Path, str]]:
+    """The stream of each of ``arms`` in ``streams_dir`` under the generator's name for it, with
+    its SHA-256, after checking it against the SHA-256 that the build's manifest registers for the
+    arm; Refused when it is not there, the manifest registers none, or they differ."""
+    found = {}
+    for arm in sorted(arms):
+        path = streams_dir / STREAM_FILES[arm]
+        try:
+            entry = registered_stream(manifest, arm, manifest_path)
+        except ManifestError as error:
+            raise Refused(str(error)) from None
+        if entry is None:
+            raise Refused(f"the build's manifest ({MANIFEST}) registers no {arm} stream")
+        if not path.is_file():
+            raise Refused(f"{streams_dir} holds no {path.name}, the {arm} stream")
+        actual = read_input(sha256_file, path)
+        if actual != entry["sha256"]:
+            raise Refused(f"{path.name} is not the {arm} stream that the build registers: its "
+                          f"SHA-256 is {actual}, and the build's manifest ({MANIFEST}) registers "
+                          f"{entry['sha256']}")
+        found[arm] = (path, actual)
+    return found
+
+
 def plan_requests(questions: list[dict], system: str, items: frozenset[str] | None,
                   runs: tuple[int, ...]) -> list[tuple[dict, str, int]]:
     """Each item, arm and run that ``system`` is asked, in the questions' order, then the arms'
@@ -227,7 +485,7 @@ def plan_requests(questions: list[dict], system: str, items: frozenset[str] | No
 
 
 def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | None,
-                   runs: tuple[int, ...]) -> int:
+                   runs: tuple[int, ...], streams_dir: Path | None = None) -> int:
     """The ``requests`` command (the module's description)."""
     if inside_repository(out_dir):
         raise Refused(f"{out_dir} is inside the repository: a run directory holds the requests "
@@ -235,41 +493,66 @@ def write_requests(system: str, data: Path, out_dir: Path, items_path: Path | No
     if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
         raise Refused(f"{out_dir} is not a new, empty directory: give each run a directory of "
                       "its own")
-    questions, questions_file, manifest_file = read_questions(data)
+    builder = CONTEXTS[system]
+    if builder is None and streams_dir is not None:
+        raise Refused(f"{system} receives the question alone and reads no stream: leave out "
+                      "--streams-dir")
+    if builder is not None and streams_dir is None:
+        raise Refused(f"{system} reads the arms' streams: give --streams-dir, the directory "
+                      f"that holds {', '.join(STREAM_FILES.values())}")
+    questions, questions_file, manifest_file, manifest = read_questions(data)
     items, items_file = (None, None) if items_path is None else read_items(items_path,
                                                                             questions)
     planned = plan_requests(questions, system, items, runs)
     if not planned:
         raise Refused(f"no item is asked: {system}'s entries hold none of the items given")
-    context_of = CONTEXTS[system]
+    # The streams are checked and the contexts built before anything is written, so that a stream
+    # the harness refuses leaves no run directory behind.
+    streams, context_of = {}, None
+    if builder is not None:
+        streams = registered_streams({stream_arm(system, arm) for _, arm, _ in planned},
+                                     streams_dir, manifest, data / MANIFEST)
+        context_of = builder(planned, {arm: path for arm, (path, _) in streams.items()})
     requests_path, keys_path = out_dir / INPUT / REQUESTS, out_dir / KEYS
     pending_requests, pending_keys = temporary_path(requests_path), temporary_path(keys_path)
     (out_dir / INPUT).mkdir(parents=True)
     (out_dir / OUTPUT).mkdir()
-    counts: dict[str, dict[str, dict[str, int]]] = {}
+    # A key for each planned request, in the items' order; none is ever the same twice.
     used: set[str] = set()
+    entries: list[tuple[str, dict, str, int]] = []
+    for q, arm, run in planned:
+        key = str(uuid.uuid4())
+        while key in used:
+            key = str(uuid.uuid4())
+        used.add(key)
+        entries.append((key, q, arm, run))
+    counts: dict[str, dict[str, dict[str, int]]] = {}
     with open(pending_requests, "w", encoding="utf-8") as requests, \
             open(pending_keys, "w", encoding="utf-8") as keys:
-        for q, arm, run in planned:
-            key = str(uuid.uuid4())
-            while key in used:
-                key = str(uuid.uuid4())
-            used.add(key)
-            request = {"key": key, "question": q["question"]}
-            if context_of is not None:
-                request["context"] = context_of(q, arm)
-            requests.write(json.dumps(request, ensure_ascii=False) + "\n")
+        for key, q, arm, run in entries:
             keys.write(json.dumps({"key": key, "id": q["id"], "arm": arm, "run": run,
                                    "answer_type": q["answer_type"]}) + "\n")
             by_run = counts.setdefault(arm, {}).setdefault(q["family"], {})
             by_run[str(run)] = by_run.get(str(run), 0) + 1
+        # The requests in ascending key order, which for random keys is a random permutation of
+        # the items' order: the reader answers a file in order, and stops after a run of
+        # api_error responses, so that one item's requests, which would fail together if its
+        # context were over the model's window, must not stand together.
+        for key, q, arm, _ in sorted(entries, key=lambda entry: entry[0]):
+            request = {"key": key, "question": q["question"]}
+            if context_of is not None:
+                request["context"] = context_of(q, arm)
+            requests.write(json.dumps(request, ensure_ascii=False) + "\n")
         for handle in (requests, keys):
             handle.flush()
             os.fsync(handle.fileno())
     write_json(out_dir / PLAN, {
         "system": system, "runs": list(runs), "questions": questions_file,
-        "manifest": manifest_file, "items": items_file, "requests": len(planned),
-        "counts": counts, "requests_sha256": sha256_file(pending_requests),
+        "manifest": manifest_file, "items": items_file,
+        "streams": {arm: {"file": path.name, "sha256": digest}
+                    for arm, (path, digest) in streams.items()} or None,
+        "requests": len(planned), "counts": counts,
+        "requests_sha256": sha256_file(pending_requests),
         "keys_sha256": sha256_file(pending_keys)})
     # The keys first and the requests last: a run directory with a requests file is a whole one.
     os.replace(pending_keys, keys_path)
@@ -297,6 +580,14 @@ def read_responses(run_dir: Path, plan: dict, keys: set[str]) -> tuple[dict[str,
         raise Refused(f"{OUTPUT}/{RUN} names no responses file in {OUTPUT}/")
     lines = read_input(read_jsonl, run_dir / OUTPUT / name)
     return answer.responses_by_key(lines, keys, name), record
+
+
+def last_exit(record: dict) -> int | None:
+    """The exit status of the run's last invocation, as run.json records it; None when it records
+    none (an invocation killed outright, or a record with no invocation)."""
+    invocations = record.get("invocations")
+    last = invocations[-1] if isinstance(invocations, list) and invocations else None
+    return last.get("exit") if isinstance(last, dict) else None
 
 
 def write_rows(system: str, run_dir: Path, out: Path) -> int:
@@ -332,9 +623,19 @@ def write_rows(system: str, run_dir: Path, out: Path) -> int:
           f"{record.get('model')}: {len(rows) - missing - unanswered} with an answer, "
           f"{unanswered} that the system could not answer, {missing} with no response")
     if missing:
+        if last_exit(record) == EXIT_FAILURES:
+            # Each api_error response is its request's own and stays, but api_error responses in
+            # a row point at a cause that every request shares: the run is discarded, never
+            # resumed under changed settings.
+            next_step = (f"the run stopped with exit status {EXIT_FAILURES} (api_error responses "
+                         "in a row, which point at a cause that every request shares): discard "
+                         "the run and run it again in a fresh run directory once the cause is "
+                         "fixed; never resume it (systems/README.md)")
+        else:
+            next_step = ("the run stopped before it answered them; resume it, then write the "
+                         "rows again")
         print(f"harness.py rows: {missing} of the {len(rows)} keys have no response, so their "
-              "rows have a null answer, which scores zero: the run stopped before it answered "
-              "them; resume it, then write the rows again", file=sys.stderr)
+              f"rows have a null answer, which scores zero: {next_step}", file=sys.stderr)
         return EXIT_FAILED
     return EXIT_DONE
 
@@ -349,6 +650,10 @@ def main(argv: list[str] | None = None) -> int:
     asked.add_argument("--data", required=True, type=Path, help="the build, such as data/v0.1")
     asked.add_argument("--out-dir", required=True, type=Path, dest="out_dir",
                        help="a new run directory, outside the repository")
+    asked.add_argument("--streams-dir", type=Path, dest="streams_dir",
+                       help="the directory that holds the arms' streams (h-plus.jsonl, "
+                            "h-minus.jsonl and cf.jsonl), which long-context and oracle read; "
+                            "closed-book is given none")
     asked.add_argument("--items", type=Path, help="a list of item ids, or pilot.json")
     asked.add_argument("--runs", default="1,2,3", help="the runs to ask, of 1, 2 and 3")
     answered = commands.add_parser("rows", help="write a run's answer rows", allow_abbrev=False)
@@ -359,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "requests":
             return write_requests(args.system, args.data, args.out_dir, args.items,
-                                  parse_runs(args.runs))
+                                  parse_runs(args.runs), args.streams_dir)
         return write_rows(args.system, args.run_dir, args.out)
     except Refused as refusal:
         print(f"harness.py {args.command}: {refusal}", file=sys.stderr)

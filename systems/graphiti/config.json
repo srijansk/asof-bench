@@ -18,6 +18,7 @@
     "auth": "none (NEO4J_AUTH=none); Neo4j is on the internal network only",
     "memory": {"heap_initial": "256m", "heap_max": "512m", "pagecache": "128m", "mem_limit": "1g"},
     "usage_report": false,
+    "restart": "unless-stopped: a Neo4j that stops is restarted, and the ingestion run it interrupted stops with exit status 2, to be resumed",
     "store": "one named volume per run (the compose project's neo4j-data), so that each arm has its own store and arms never share one"
   },
   "llm": {
@@ -66,7 +67,7 @@
   },
   "search": {
     "while_ingesting": "Graphiti's own duplicate searches: EDGE_HYBRID_SEARCH_RRF for edges (BM25 and cosine similarity fused by reciprocal rank) and exact names and a direct cosine-similarity search for nodes (_semantic_candidate_search), none with a reranker",
-    "answering": "a later plan: Graphiti.search with no center node, EDGE_HYBRID_SEARCH_RRF"
+    "answering": "the answering path, added before any scored run: Graphiti.search with no center node, EDGE_HYBRID_SEARCH_RRF"
   },
   "episodes": {
     "group_id": "the episode's corpus, pep or eth",
@@ -74,7 +75,7 @@
     "saga": "one saga per proposal, named by the episode's proposal id, with saga_previous_episode_uuid from the adapter's state (the proposal's last ingested episode)",
     "previous_episodes": {
       "count": 3,
-      "rule": "previous_episode_uuids is the uuids of the same proposal's last 3 ingested episodes (Graphiti's EPISODE_WINDOW_LEN), oldest first, and empty for its first episode"
+      "rule": "previous_episode_uuids is the uuids of the same proposal's last 3 ingested episodes (Graphiti's EPISODE_WINDOW_LEN), all recorded before the episode, oldest first, and empty for its first episode; the saga predecessor is the last of them. Graphiti's get_by_uuids does not order the episodes it returns, so the window's order inside Graphiti's prompt is Graphiti's own"
     },
     "name": "episode_id",
     "episode_body": "asofbench_systems.stream.render_episode, the one episode template of every store system",
@@ -86,7 +87,13 @@
     "custom_extraction_instructions": null,
     "update_communities": false
   },
-  "failures": "Graphiti's own retries and the SDK's apply; an episode that still raises is logged with ok false and the run goes on; ingest --resume attempts every episode the log does not record as ingested",
+  "failures": {
+    "order": "within a group, episodes are ingested strictly in stream order, so that no episode is ingested after a later one of its group",
+    "retries": "Graphiti's own retries and the SDK's apply first; an episode that still raises is attempted twice more in place, after 30 s and then 120 s, with the same previous episodes and saga predecessor, and one that still raises is logged with ok false and never attempted again, by the run or a resumed one",
+    "infrastructure": "an infrastructure error stops the run with exit status 2 and leaves the episode unlogged, so that a resumed run attempts it again: Neo4j unavailable or a session lost (ServiceUnavailable, SessionExpired, SessionError, DatabaseUnavailable); the embedder unreachable or failing (openai APIConnectionError, InternalServerError); after the SDK's own retries, the API unreachable, rate-limited, overloaded or failing, or refusing the key (anthropic APIConnectionError, RateLimitError, OverloadedError, InternalServerError, AuthenticationError, PermissionDeniedError, and Graphiti's RateLimitError); so does a failed attempt that left the episode in the store",
+    "consecutive_failures": "5 logged failures in a row in a group stop the run with exit status 3",
+    "resume": "ingest --resume continues each group from its first episode with no log line, on the stream and arm the run began with"
+  },
   "concurrency": {
     "semaphore_limit": 20,
     "source": "Graphiti's DEFAULT_SEMAPHORE_LIMIT; SEMAPHORE_LIMIT is not set"
@@ -161,7 +168,8 @@
         "index": "neo4j:5.26.32-community@sha256:249a1ec6e3c52d82101a5ed33d6ed2b5ed5b0017b21a28c0bfebc335e87fb177",
         "linux/arm64": "sha256:39232fdab9f5307087e5f0c34a422887ea3e1d72b05bb7cb1553475fc736ce0b",
         "linux/amd64": "sha256:fe8607113c4177fbd2466bf2c30f1ebab5b9530594e86487c58c98e113145192"
-      }
+      },
+      "per_run": "each run records the IDs of the four images it ran with, which its launcher gives in ASOFBENCH_IMAGE_IDS, in its run.json and summary.json"
     }
   }
 }

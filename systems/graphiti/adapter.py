@@ -15,14 +15,17 @@ same configuration, and README.md describes it).
   ingesting; the answering path embeds questions with ``voyage-4-nano-query``.
 - Cross-encoder: ``NoReranker``, whose ``rank`` raises, since no system reranks with a model.
 - Episodes: ``group_id`` is the episode's corpus; one saga per proposal, named by its id; the
-  previous episodes are the same proposal's last ``EPISODE_WINDOW_LEN`` ingested episodes, oldest
-  first; the episode's text is ``asofbench_systems.stream.render_episode``; no entity or edge
-  types, no custom extraction instructions, no community update.
+  previous episodes are the same proposal's last ``EPISODE_WINDOW_LEN`` ingested episodes, all
+  recorded before it, oldest first, and the saga predecessor the last of them; the episode's text
+  is ``asofbench_systems.stream.render_episode``; no entity or edge types, no custom extraction
+  instructions, no community update.
 
 The module's constants and ``episode_arguments`` use only the standard library and the shared
 package; graphiti-core and anthropic are imported only inside the functions that build Graphiti,
 so the module imports where neither is installed. ``python -m graphiti.adapter --self-test``,
-which the image's build runs with no network, checks the installation against config.json.
+which the image's build runs with no network, checks the installation against config.json, and
+``python -m graphiti.adapter --remove-episodes <uuid>... --out <run's output>`` removes episodes
+that an attempt left in the store, which a resumed run refuses (README.md).
 """
 
 from __future__ import annotations
@@ -234,11 +237,60 @@ def check_installation(config_path: Path = CONFIG) -> dict[str, str]:
     return installed
 
 
+def ingested_uuids(out_dir: Path) -> set[str]:
+    """The uuids of the episodes that the run's ingest log records as ingested."""
+    path = out_dir / "ingest-log.jsonl"
+    if not path.exists():
+        return set()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return {line["episode_uuid"] for line in lines if line.get("ok")}
+
+
+async def remove_episodes(uuids: list[str], out_dir: Path, key_file: str = llm.KEY_FILE,
+                          progress=print) -> int:
+    """Removes, with Graphiti's own remove_episode, each episode of ``uuids`` that the store
+    holds and the run's ingest log does not record as ingested: what an attempt wrote before it
+    stopped. remove_episode rebuilds the summaries of the entities the episode mentioned with
+    the construction model, so its calls are recorded in the run's usage log, under
+    ``remove-episode:<episode id>``. Returns the exit status: 0 when every uuid is removed."""
+    if refused := sorted(set(uuids) & ingested_uuids(out_dir)):
+        progress(f"remove-episodes: the log records {', '.join(refused)} as ingested; only an "
+                 "episode it does not record is removed")
+        return 2
+    engine = await open_engine(usage.UsageLog(str(out_dir / "usage.jsonl")), key_file)
+    status = 0
+    try:
+        stored = {episode["uuid"]: episode for episode in await engine.stored_episodes()}
+        for uuid in uuids:
+            if uuid not in stored:
+                progress(f"remove-episodes: the store holds no episode {uuid}")
+                status = 2
+                continue
+            token = usage.usage_context.set(f"remove-episode:{stored[uuid]['name']}")
+            try:
+                await engine.graphiti.remove_episode(uuid)
+            finally:
+                usage.usage_context.reset(token)
+            progress(f"remove-episodes: removed {uuid} ({stored[uuid]['name']})")
+    finally:
+        await engine.close()
+    return status
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Graphiti as asof-bench configures it.")
-    parser.add_argument("--self-test", action="store_true", required=True,
-                        help="check the installation against config.json, with no network")
-    parser.parse_args(argv)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true",
+                      help="check the installation against config.json, with no network")
+    mode.add_argument("--remove-episodes", nargs="+", metavar="UUID",
+                      help="remove episodes that an attempt left in the store (README.md)")
+    parser.add_argument("--out", type=Path,
+                        help="with --remove-episodes: the run's output directory")
+    args = parser.parse_args(argv)
+    if args.remove_episodes:
+        if args.out is None:
+            parser.error("--remove-episodes needs --out, the run's output directory")
+        return asyncio.run(remove_episodes(args.remove_episodes, args.out))
     try:
         installed = check_installation()
     except RuntimeError as error:

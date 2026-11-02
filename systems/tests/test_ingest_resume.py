@@ -1,12 +1,14 @@
-"""Graphiti's ingestion loop (graphiti/ingest.py) with a fake Graphiti: which episodes a run and a
-resumed run attempt, the previous-episode window and saga predecessor each episode is given, the
-ingest log's lines, and the totals of summary.json. It also checks that config.json agrees with
-the adapter and with the image's lock. Standard library only: neither graphiti-core nor anthropic
-is imported."""
+"""Graphiti's ingestion loop (graphiti/ingest.py) with a fake Graphiti: strict stream order, the
+in-place retries, the infrastructure stop and the stop after consecutive failures, what a resumed
+run attempts, the previous-episode window and saga predecessor each episode is given, the ingest
+log and run.json, and the totals of summary.json. It also checks that config.json agrees with the
+adapter and with the image's lock. Standard library only: neither graphiti-core nor anthropic is
+imported."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -17,6 +19,20 @@ from graphiti import adapter, ingest
 
 KEY = "sk-ant-api00-made-up-for-tests-0123456789"
 GRAPHITI = Path(__file__).resolve().parents[1] / "graphiti"
+IMAGES = {name: "sha256:" + str(n) * 64 for n, name in enumerate(ingest.IMAGE_NAMES, 1)}
+
+
+def failure(module: str, name: str) -> type[Exception]:
+    """An exception class that stands in for one of a package's, by its module and name."""
+    return type(name, (Exception,), {"__module__": module})
+
+
+ServiceUnavailable = failure("neo4j.exceptions", "ServiceUnavailable")
+SessionExpired = failure("neo4j.exceptions", "SessionExpired")
+EmbedderDown = failure("openai._exceptions", "APIConnectionError")
+Overloaded = failure("anthropic._exceptions", "OverloadedError")
+BadRequest = failure("anthropic._exceptions", "BadRequestError")
+GraphitiRateLimit = failure("graphiti_core.llm_client.errors", "RateLimitError")
 
 
 def episode(n: int, proposal: str = "PEP-1", corpus: str = "pep", kind: str = "modify",
@@ -35,15 +51,16 @@ def write_stream(path: Path, episodes: list[dict]) -> Path:
     return path
 
 
-def log_line(e: dict, ok: bool, uuid: str | None, wall_s: float = 2.0) -> dict:
+def log_line(e: dict, ok: bool, uuid: str | None, wall_s: float = 2.0, attempts: int = 1) -> dict:
     return {"episode_id": e["episode_id"], "proposal": e["proposal"], "group_id": e["corpus"],
             "episode_uuid": uuid, "ok": ok, "error": None if ok else "RuntimeError: earlier",
-            "started_at": "2026-11-01T00:00:00Z", "wall_s": wall_s, "text_chars": len(e["text"])}
+            "started_at": "2026-11-01T00:00:00Z", "wall_s": wall_s, "text_chars": len(e["text"]),
+            "attempts": attempts}
 
 
 def usage_line(context: str | None, input_tokens: int, output_tokens: int, created: int = 0,
-               read: int = 0) -> dict:
-    return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "model": "claude-haiku-5-5",
+               read: int = 0, model: str = "claude-haiku-5-5") -> dict:
+    return {"ts": "2026-11-01T00:00:00.000Z", "context": context, "model": model,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
             "cache_creation_input_tokens": created, "cache_read_input_tokens": read,
             "stop_reason": "tool_use"}
@@ -59,11 +76,15 @@ def read_jsonl(path: Path) -> list[dict]:
 
 class FakeEngine:
     """Stands in for Graphiti: records each add_episode's arguments, makes two model calls per
-    episode through the run's usage log (as the instrumented client does), stores each episode
-    it ingests, and fails the episodes named in ``fail``."""
+    attempt through the run's usage log (as the instrumented client does), and stores each
+    episode it ingests. ``outcomes`` gives, for an episode, what each of its attempts does: an
+    exception to raise, "orphan" to store the episode and then raise, or None to succeed (the
+    default once the list is used up)."""
 
-    def __init__(self, usage_log: usage.UsageLog, stored: list[dict], fail: set[str]) -> None:
-        self.usage_log, self.stored, self.fail = usage_log, stored, fail
+    def __init__(self, usage_log: usage.UsageLog, stored: list[dict],
+                 outcomes: dict[str, list]) -> None:
+        self.usage_log, self.stored = usage_log, stored
+        self.outcomes = {name: list(plan) for name, plan in outcomes.items()}
         self.calls: list[dict] = []
         self.source, self.version, self.closed = "text", "0.31.2", False
 
@@ -74,9 +95,15 @@ class FakeEngine:
             self.usage_log.record(usage.usage_context.get(), "claude-haiku-5-5",
                                   {"input_tokens": tokens, "output_tokens": tokens // 10},
                                   "tool_use")
-        if arguments["name"] in self.fail:
-            raise RuntimeError(f"toy failure quoting the key {KEY} and more: " + "x" * 400)
+        plan = self.outcomes.get(arguments["name"], [])
+        outcome = plan.pop(0) if plan else None
         uuid = f"uuid-{arguments['name']}"
+        if outcome == "orphan":
+            self.stored.append({"uuid": uuid, "name": arguments["name"],
+                                "group_id": arguments["group_id"]})
+            raise RuntimeError("failed after writing")
+        if outcome is not None:
+            raise outcome
         self.stored.append({"uuid": uuid, "name": arguments["name"],
                             "group_id": arguments["group_id"]})
         return uuid
@@ -89,25 +116,40 @@ class FakeEngine:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, episodes: list[dict]) -> None:
+    def __init__(self, tmp_path: Path, episodes: list[dict], arm: str = "H+") -> None:
         self.stream = write_stream(tmp_path / "toy.jsonl", episodes)
+        self.arm = arm
         self.out = tmp_path / "out"
         self.out.mkdir()
         self.key_file = tmp_path / "key"
         self.key_file.write_text(KEY + "\n", encoding="ascii")
         self.stored: list[dict] = []
         self.engines: list[FakeEngine] = []
+        self.messages: list[str] = []
 
-    def run(self, resume: bool, fail: set[str] = frozenset()) -> int:
+    def run(self, resume: bool, outcomes: dict[str, list] | None = None,
+            arm: str | None = None) -> int:
         async def open_engine(usage_log, key_file):
             assert key_file == str(self.key_file)
-            engine = FakeEngine(usage_log, self.stored, set(fail))
+            engine = FakeEngine(usage_log, self.stored, outcomes or {})
             self.engines.append(engine)
             return engine
 
-        return asyncio.run(ingest.run(self.stream, "H+", self.out, resume=resume,
-                                      open_engine=open_engine, preflight=None,
-                                      key_file=str(self.key_file)))
+        return asyncio.run(ingest.run(self.stream, arm or self.arm, self.out, resume=resume,
+                                      images=IMAGES, open_engine=open_engine, preflight=None,
+                                      key_file=str(self.key_file), delays=(0.0, 0.0),
+                                      progress=self.messages.append))
+
+    def begun(self, log: list[dict], usage_lines: list[dict]) -> None:
+        """The state an earlier invocation left: its run.json, log and usage lines."""
+        sha = hashlib.sha256(self.stream.read_bytes()).hexdigest()
+        (self.out / "run.json").write_text(json.dumps({
+            "stream": self.stream.name, "stream_sha256": sha, "arm": self.arm,
+            "invocations": [{"started_at": "2026-11-01T00:00:00Z", "resume": False,
+                             "images": IMAGES, "elapsed_s": 40.0, "exit": 2}]}),
+            encoding="utf-8")
+        write_jsonl(self.out / "ingest-log.jsonl", log)
+        write_jsonl(self.out / "usage.jsonl", usage_lines)
 
     def log(self) -> list[dict]:
         return read_jsonl(self.out / "ingest-log.jsonl")
@@ -118,95 +160,192 @@ class Harness:
     def summary(self) -> dict:
         return json.loads((self.out / "summary.json").read_text(encoding="utf-8"))
 
+    def record(self) -> dict:
+        return json.loads((self.out / "run.json").read_text(encoding="utf-8"))
 
-def test_resume_attempts_the_failed_and_unstarted_episodes_only(tmp_path):
+
+def test_resume_continues_after_the_logged_episodes_and_never_retries_a_failed_one(tmp_path):
     episodes = [episode(n, kind="create" if n == 1 else "modify") for n in range(1, 6)]
     harness = Harness(tmp_path, episodes)
-    # The first run: episodes 1 to 3 ingested, 4 failed, and the run died before 5.
+    # The earlier invocation: episodes 1 to 3 ingested, 4 logged as failed after its attempts,
+    # and it stopped before 5.
     earlier = [log_line(episodes[0], True, "u1", 3.0), log_line(episodes[1], True, "u2", 4.0),
-               log_line(episodes[2], True, "u3", 5.0), log_line(episodes[3], False, None, 6.0)]
-    write_jsonl(harness.out / "ingest-log.jsonl", earlier)
+               log_line(episodes[2], True, "u3", 5.0),
+               log_line(episodes[3], False, None, 6.0, attempts=3)]
     earlier_usage = [usage_line(e["episode_id"], 500 * n, 40 * n, created=n, read=2 * n)
                      for n, e in enumerate(episodes[:4], 1)]
-    write_jsonl(harness.out / "usage.jsonl", earlier_usage)
+    harness.begun(earlier, earlier_usage)
     harness.stored += [{"uuid": u, "name": e["episode_id"], "group_id": "pep"}
                        for u, e in zip(("u1", "u2", "u3"), episodes, strict=False)]
 
-    assert harness.run(resume=True) == 0
+    assert harness.run(resume=True) == ingest.EXIT_FAILED
     (engine,) = harness.engines
-    assert [call["name"] for call in engine.calls] == [episodes[3]["episode_id"],
-                                                       episodes[4]["episode_id"]]
-    fourth, fifth = engine.calls
-    # The window and the saga predecessor come from the logged uuids, oldest first.
-    assert fourth["previous_episode_uuids"] == ["u1", "u2", "u3"]
-    assert fourth["saga_previous_episode_uuid"] == "u3"
-    new4 = f"uuid-{episodes[3]['episode_id']}"
-    assert fifth["previous_episode_uuids"] == ["u2", "u3", new4]
-    assert fifth["saga_previous_episode_uuid"] == new4
-    assert {call["saga"] for call in engine.calls} == {"PEP-1"}
-    assert engine.closed
+    # Only episode 5 is attempted: 4 is logged, so it is never attempted again.
+    assert [call["name"] for call in engine.calls] == [episodes[4]["episode_id"]]
+    (fifth,) = engine.calls
+    # The window holds the proposal's last ingested episodes, all recorded before it, oldest
+    # first; the failed episode 4 is not one of them.
+    assert fifth["previous_episode_uuids"] == ["u1", "u2", "u3"]
+    assert fifth["saga_previous_episode_uuid"] == "u3"
+    assert fifth["saga"] == "PEP-1" and engine.closed
 
     log = harness.log()
     assert log[:4] == earlier
-    assert [(line["episode_id"], line["ok"]) for line in log[4:]] == [
-        (episodes[3]["episode_id"], True), (episodes[4]["episode_id"], True)]
-
+    assert [(line["episode_id"], line["ok"], line["attempts"]) for line in log[4:]] == [
+        (episodes[4]["episode_id"], True, 1)]
     lines = harness.usage()
-    assert lines[:4] == earlier_usage and len(lines) == 8
-    assert [line["context"] for line in lines[4:]] == [episodes[3]["episode_id"]] * 2 + [
-        episodes[4]["episode_id"]] * 2
+    assert lines[:4] == earlier_usage and len(lines) == 6
     summary = harness.summary()
-    # Every usage line is summed once, the earlier run's and the resumed run's, cache tokens
+    # Every usage line is summed once, the earlier invocation's and this one's, cache tokens
     # included in the input.
     assert summary["input_tokens"] == sum(line["input_tokens"]
                                           + line["cache_creation_input_tokens"]
                                           + line["cache_read_input_tokens"] for line in lines)
     assert summary["input_tokens"] == (500 + 1000 + 1500 + 2000) + (1 + 2 + 3 + 4) + (
-        2 + 4 + 6 + 8) + 2 * (1000 + 2000)
-    assert summary["output_tokens"] == (40 + 80 + 120 + 160) + 2 * (100 + 200)
-    assert (summary["calls"], summary["calls_over_100k_input"]) == (8, 0)
-    assert (summary["episodes"], summary["ok"], summary["failed"]) == (5, 5, 0)
+        2 + 4 + 6 + 8) + (1000 + 2000)
+    assert summary["output_tokens"] == (40 + 80 + 120 + 160) + (100 + 200)
+    assert (summary["calls"], summary["calls_over_100k_input"]) == (6, 0)
+    assert (summary["episodes"], summary["ok"], summary["failed"]) == (5, 4, 1)
     assert summary["text_chars"] == sum(len(e["text"]) for e in episodes)
-    assert summary["wall_s"] == pytest.approx(3.0 + 4.0 + 5.0 + 6.0 + sum(
-        line["wall_s"] for line in log[4:]), abs=1e-3)
+    assert summary["wall_s"] == pytest.approx(3.0 + 4.0 + 5.0 + 6.0 + log[4]["wall_s"], abs=1e-3)
+    record = harness.record()
+    assert summary["elapsed_s"] == pytest.approx(40.0 + record["invocations"][1]["elapsed_s"])
+    assert summary["invocations"] == 2 and record["invocations"][1]["resume"] is True
+    assert record["invocations"][1]["exit"] == ingest.EXIT_FAILED
     assert (summary["graphiti_core"], summary["model"], summary["arm"]) == (
         "0.31.2", "claude-haiku-5-5", "H+")
+    assert summary["images"] == {name: [value] for name, value in IMAGES.items()}
+    assert (summary["stream"], summary["stream_sha256"]) == (
+        "toy.jsonl", hashlib.sha256(harness.stream.read_bytes()).hexdigest())
 
 
 def test_a_resume_with_nothing_to_do_attempts_nothing_and_counts_the_same(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     harness = Harness(tmp_path, episodes)
-    assert harness.run(resume=False) == 0
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
     first, log = harness.summary(), harness.log()
-    assert harness.run(resume=True) == 0
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
     assert harness.engines[1].calls == []
-    assert harness.log() == log and harness.summary() == first
+    second = harness.summary()
+    assert harness.log() == log and second["invocations"] == 2
+
+    def counts(summary: dict) -> dict:
+        return {key: value for key, value in summary.items()
+                if key not in ("elapsed_s", "invocations")}
+
+    assert counts(second) == counts(first)
 
 
-def test_a_failed_episode_is_logged_and_the_run_continues_without_it(tmp_path):
-    episodes = [episode(1, kind="create"), episode(2), episode(3)]
+def test_a_failed_attempt_is_retried_in_place_and_a_failed_episode_is_logged_once(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2), episode(3), episode(4)]
+    ids = [e["episode_id"] for e in episodes]
     harness = Harness(tmp_path, episodes)
-    assert harness.run(resume=False, fail={episodes[1]["episode_id"]}) == 1
-    first, second, third = harness.log()
-    assert (first["ok"], second["ok"], third["ok"]) == (True, False, True)
-    assert second["episode_uuid"] is None
-    assert second["error"].startswith("RuntimeError: toy failure quoting the key [redacted]")
-    assert len(second["error"]) == len("RuntimeError: ") + 300
-    assert KEY not in (harness.out / "ingest-log.jsonl").read_text(encoding="utf-8")
-    assert set(second) == {"episode_id", "proposal", "group_id", "episode_uuid", "ok", "error",
-                           "started_at", "wall_s", "text_chars"}
-    # The third episode follows the last ingested one, not the failed one.
+    message = RuntimeError(f"toy failure quoting the key {KEY} and more: " + "x" * 400)
+    # Episode 2 fails once and then succeeds; episode 3 fails all three of its attempts.
+    outcomes = {ids[1]: [ValueError("bad output")],
+                ids[2]: [BadRequest("a"), BadRequest("b"), message]}
+    assert harness.run(resume=False, outcomes=outcomes) == ingest.EXIT_FAILED
     calls = harness.engines[0].calls
-    assert calls[2]["previous_episode_uuids"] == [first["episode_uuid"]]
-    assert calls[2]["saga_previous_episode_uuid"] == first["episode_uuid"]
+    assert [call["name"] for call in calls] == [ids[0], ids[1], ids[1], ids[2], ids[2], ids[2],
+                                                ids[3]]
+    # Every attempt of an episode is given the same previous episodes and saga predecessor.
+    assert calls[1]["previous_episode_uuids"] == calls[2]["previous_episode_uuids"] == [
+        f"uuid-{ids[0]}"]
+    assert all(call["saga_previous_episode_uuid"] == f"uuid-{ids[1]}" for call in calls[3:6])
+    first, second, third, fourth = harness.log()
+    assert (second["ok"], second["attempts"], second["error"]) == (
+        True, 2, "ValueError: bad output")
+    assert (third["ok"], third["attempts"], third["episode_uuid"]) == (False, 3, None)
+    assert third["error"].startswith("RuntimeError: toy failure quoting the key [redacted]")
+    assert len(third["error"]) == len("RuntimeError: ") + 300
+    assert KEY not in (harness.out / "ingest-log.jsonl").read_text(encoding="utf-8")
+    assert set(third) == set(ingest.LOG_FIELDS)
+    # The fourth episode follows the last ingested one, not the failed one.
+    assert calls[6]["previous_episode_uuids"] == [f"uuid-{ids[0]}", f"uuid-{ids[1]}"]
+    assert (first["attempts"], fourth["ok"], fourth["error"]) == (1, True, None)
+    # Every attempt's model calls are attributed to its episode.
+    assert [line["context"] for line in harness.usage()].count(ids[2]) == 6
+    assert any("attempt 1 failed" in text for text in harness.messages)
+    # A resumed run never attempts the failed episode again.
+    assert harness.run(resume=True) == ingest.EXIT_FAILED
+    assert harness.engines[1].calls == []
+    assert (harness.summary()["ok"], harness.summary()["failed"]) == (3, 1)
+
+
+@pytest.mark.parametrize("error", [ServiceUnavailable("neo4j:7687"), SessionExpired("lost"),
+                                   EmbedderDown("embedder:8080"), Overloaded("529"),
+                                   GraphitiRateLimit("429")])
+def test_an_infrastructure_error_stops_the_run_unlogged_and_a_resume_attempts_it(tmp_path,
+                                                                                 error):
+    episodes = [episode(n, kind="create" if n == 1 else "modify") for n in range(1, 5)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={ids[2]: [error]}) == ingest.EXIT_STOPPED
+    # The run stops at once: no retry, and nothing after the episode.
+    assert [call["name"] for call in harness.engines[0].calls] == ids[:3]
+    assert [line["episode_id"] for line in harness.log()] == ids[:2]
     summary = harness.summary()
-    assert (summary["episodes"], summary["ok"], summary["failed"]) == (3, 2, 1)
-    # Its retry comes after the episodes ingested since, which it now follows.
-    assert harness.run(resume=True) == 0
-    retry = harness.engines[1].calls
-    assert [call["name"] for call in retry] == [episodes[1]["episode_id"]]
-    assert retry[0]["previous_episode_uuids"] == [first["episode_uuid"], third["episode_uuid"]]
-    assert (harness.summary()["ok"], harness.summary()["failed"]) == (3, 0)
+    assert (summary["ok"], summary["failed"], summary["calls"]) == (2, 0, 6)
+    assert harness.record()["invocations"][0]["exit"] == ingest.EXIT_STOPPED
+    assert any("stopped (exit 2)" in text for text in harness.messages)
+    # Once the infrastructure is back, a resume continues from that episode.
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    resumed = harness.engines[1].calls
+    assert [call["name"] for call in resumed] == ids[2:]
+    assert resumed[0]["previous_episode_uuids"] == [f"uuid-{ids[0]}", f"uuid-{ids[1]}"]
+    assert [line["episode_id"] for line in harness.log()] == ids
+    assert all(line["attempts"] == 1 for line in harness.log())
+    # The stopped attempt's calls stay counted, under its episode.
+    assert [line["context"] for line in harness.usage()].count(ids[2]) == 4
+    assert [i["exit"] for i in harness.record()["invocations"]] == [ingest.EXIT_STOPPED,
+                                                                     ingest.EXIT_INGESTED]
+
+
+def test_a_stop_lets_the_other_group_finish_its_episode_and_start_no_other(tmp_path):
+    episodes = [episode(1, "PEP-1", kind="create"), episode(2, "EIP-1", "eth", kind="create"),
+                episode(3, "PEP-1"), episode(4, "EIP-1", "eth")]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={ids[0]: [ServiceUnavailable()]}) == 2
+    assert sorted(call["name"] for call in harness.engines[0].calls) == sorted(ids[:2])
+    assert [(line["episode_id"], line["ok"]) for line in harness.log()] == [(ids[1], True)]
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    assert sorted(call["name"] for call in harness.engines[1].calls) == sorted(
+        [ids[0], ids[2], ids[3]])
+
+
+def test_five_consecutive_failures_in_a_group_stop_the_run(tmp_path):
+    episodes = [episode(n, kind="create" if n == 1 else "modify") for n in range(1, 10)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    outcomes = {ids[n]: [ValueError(str(n))] * 3 for n in range(1, 7)}
+    assert harness.run(resume=False, outcomes=outcomes) == ingest.EXIT_FAILURES
+    assert [(line["episode_id"], line["ok"]) for line in harness.log()] == [
+        (ids[0], True)] + [(ids[n], False) for n in range(1, 6)]
+    assert {call["name"] for call in harness.engines[0].calls} == set(ids[:6])
+    assert harness.summary()["failed"] == 5
+    assert any("5 consecutive pep episodes failed" in text for text in harness.messages)
+    # A resume counts on from the log: the sixth failure in a row stops it again at once.
+    assert harness.run(resume=True, outcomes={ids[6]: [ValueError("6")] * 3}) == 3
+    assert [call["name"] for call in harness.engines[1].calls] == [ids[6]] * 3
+    # An ingested episode ends the run of failures.
+    assert harness.run(resume=True) == ingest.EXIT_FAILED
+    assert [call["name"] for call in harness.engines[2].calls] == ids[7:]
+
+
+def test_a_failed_attempt_that_left_the_episode_in_the_store_stops_the_run(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    ids = [e["episode_id"] for e in episodes]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={ids[1]: ["orphan"]}) == ingest.EXIT_STOPPED
+    assert [line["episode_id"] for line in harness.log()] == [ids[0]]
+    assert any(f"uuid-{ids[1]}" in text for text in harness.messages)
+    # A resume refuses the store until the episode left in it is removed.
+    with pytest.raises(ingest.Refused, match="remove-episodes"):
+        harness.run(resume=True)
+    harness.stored[:] = [s for s in harness.stored if s["name"] != ids[1]]
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
+    assert [line["episode_id"] for line in harness.log()] == ids
 
 
 def test_each_proposal_keeps_its_own_window_and_the_corpora_are_separate_groups(tmp_path):
@@ -215,7 +354,7 @@ def test_each_proposal_keeps_its_own_window_and_the_corpora_are_separate_groups(
                 episode(5, "PEP-1"), episode(6, "PEP-1"), episode(7, "PEP-1"),
                 episode(8, "PEP-1", kind="delete", text="")]
     harness = Harness(tmp_path, episodes)
-    assert harness.run(resume=False) == 0
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
     calls = {call["name"]: call for call in harness.engines[0].calls}
     uuid = {e["episode_id"]: f"uuid-{e['episode_id']}" for e in episodes}
     ids = [e["episode_id"] for e in episodes]
@@ -230,6 +369,29 @@ def test_each_proposal_keeps_its_own_window_and_the_corpora_are_separate_groups(
     assert [name for name in order if name in pep] == pep
     # Every model call is attributed to the episode it was made for.
     assert {line["context"] for line in harness.usage()} == set(ids)
+
+
+def test_no_output_holds_a_local_path(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    harness = Harness(tmp_path, episodes)
+    assert harness.run(resume=False, outcomes={episodes[1]["episode_id"]: [ValueError("x")]}) == 0
+    for name in ("run.json", "summary.json", "usage.jsonl", "ingest-log.jsonl"):
+        text = (harness.out / name).read_text(encoding="utf-8")
+        assert str(tmp_path) not in text and "/" not in text
+
+
+def test_a_resume_refuses_another_stream_or_arm_or_a_missing_run(tmp_path):
+    episodes = [episode(1, kind="create"), episode(2)]
+    harness = Harness(tmp_path, episodes)
+    with pytest.raises(ingest.Refused, match="no run to resume"):
+        harness.run(resume=True)
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
+    with pytest.raises(ingest.Refused, match="began with the H\\+ stream"):
+        harness.run(resume=True, arm="H-")
+    write_stream(harness.stream, [episode(1, kind="create"), episode(2, text="edited\n")])
+    with pytest.raises(ingest.Refused, match="SHA-256"):
+        harness.run(resume=True)
+    assert len(harness.engines) == 1
 
 
 def test_episode_arguments_follow_the_configuration():
@@ -254,7 +416,7 @@ def test_episode_arguments_follow_the_configuration():
 def test_a_new_run_refuses_an_output_or_a_store_that_holds_a_run(tmp_path):
     episodes = [episode(1, kind="create")]
     harness = Harness(tmp_path, episodes)
-    assert harness.run(resume=False) == 0
+    assert harness.run(resume=False) == ingest.EXIT_INGESTED
     with pytest.raises(ingest.Refused, match="--resume"):
         harness.run(resume=False)
     (tmp_path / "other").mkdir()
@@ -263,21 +425,30 @@ def test_a_new_run_refuses_an_output_or_a_store_that_holds_a_run(tmp_path):
     with pytest.raises(ingest.Refused, match="store"):
         other.run(resume=False)
     assert other.engines[0].calls == [] and other.engines[0].closed
+    assert other.record()["invocations"][0]["exit"] == ingest.EXIT_STOPPED
 
 
 def test_a_resume_refuses_a_store_or_a_log_that_does_not_match(tmp_path):
-    episodes = [episode(1, kind="create"), episode(2)]
+    episodes = [episode(1, kind="create"), episode(2), episode(3)]
     harness = Harness(tmp_path, episodes)
-    write_jsonl(harness.out / "ingest-log.jsonl", [log_line(episodes[0], True, "u1")])
-    write_jsonl(harness.out / "usage.jsonl", [])
+    harness.begun([log_line(episodes[0], True, "u1")], [])
     with pytest.raises(ingest.Refused, match="lacks"):
         harness.run(resume=True)
     harness.stored += [{"uuid": "u1", "name": episodes[0]["episode_id"], "group_id": "pep"},
-                       {"uuid": "orphan", "name": episodes[1]["episode_id"], "group_id": "pep"}]
-    with pytest.raises(ingest.Refused, match="orphan"):
+                       {"uuid": "left", "name": episodes[1]["episode_id"], "group_id": "pep"}]
+    with pytest.raises(ingest.Refused, match="remove-episodes"):
         harness.run(resume=True)
     write_jsonl(harness.out / "ingest-log.jsonl", [log_line(episode(9), True, "u9")])
     with pytest.raises(ingest.Refused, match="not in the stream"):
+        harness.run(resume=True)
+    # A log that skips an episode of its group is not the group's first episodes.
+    write_jsonl(harness.out / "ingest-log.jsonl", [log_line(episodes[0], True, "u1"),
+                                                   log_line(episodes[2], True, "u3")])
+    with pytest.raises(ingest.Refused, match="first ones"):
+        harness.run(resume=True)
+    write_jsonl(harness.out / "ingest-log.jsonl", [log_line(episodes[0], True, "u1"),
+                                                   log_line(episodes[0], False, None)])
+    with pytest.raises(ingest.Refused, match="has a line already"):
         harness.run(resume=True)
 
 
@@ -298,26 +469,67 @@ def test_a_stream_that_cannot_be_ingested_is_refused_before_anything_starts(tmp_
 def test_resume_drops_an_unfinished_last_line(tmp_path):
     episodes = [episode(1, kind="create"), episode(2)]
     harness = Harness(tmp_path, episodes)
-    write_jsonl(harness.out / "ingest-log.jsonl", [log_line(episodes[0], True, "u1")])
+    harness.begun([log_line(episodes[0], True, "u1")],
+                  [usage_line(episodes[0]["episode_id"], 10, 1)])
     with open(harness.out / "ingest-log.jsonl", "a", encoding="utf-8") as handle:
         handle.write('{"episode_id": "unfinished')
-    write_jsonl(harness.out / "usage.jsonl", [usage_line(episodes[0]["episode_id"], 10, 1)])
     with open(harness.out / "usage.jsonl", "a", encoding="utf-8") as handle:
         handle.write('{"ts": "2026')
     harness.stored.append({"uuid": "u1", "name": episodes[0]["episode_id"], "group_id": "pep"})
-    assert harness.run(resume=True) == 0
+    assert harness.run(resume=True) == ingest.EXIT_INGESTED
     assert [line["ok"] for line in harness.log()] == [True, True]
     assert harness.summary()["calls"] == 1 + 2
 
 
-def test_summary_counts_calls_over_100k_input_tokens():
+def test_infrastructure_errors_are_told_from_the_episode_s_own():
+    assert ingest.infrastructure_error(ServiceUnavailable()) == "neo4j ServiceUnavailable"
+    assert ingest.infrastructure_error(ConnectionRefusedError()) == "builtins ConnectionError"
+    assert ingest.infrastructure_error(Overloaded()) == "anthropic OverloadedError"
+    assert ingest.infrastructure_error(ValueError("bad output")) is None
+    assert ingest.infrastructure_error(BadRequest("prompt is too long")) is None
+    # Through a cause, as Graphiti raises its RateLimitError from the SDK's, and inside a group.
+    try:
+        try:
+            raise failure("anthropic._exceptions", "RateLimitError")("429")
+        except Exception as cause:
+            raise RuntimeError("wrapped") from cause
+    except RuntimeError as wrapped:
+        assert ingest.infrastructure_error(wrapped) == "anthropic RateLimitError"
+    group = ExceptionGroup("several", [ValueError("x"), SessionExpired("lost")])
+    assert ingest.infrastructure_error(group) == "neo4j SessionExpired"
+    subclass = type("APITimeoutError", (EmbedderDown,), {"__module__": "openai._exceptions"})
+    assert ingest.infrastructure_error(subclass()) == "openai APIConnectionError"
+
+
+def test_the_image_ids_are_parsed_and_checked():
+    text = ",".join(f"{name}={value}" for name, value in IMAGES.items())
+    assert ingest.parse_image_ids(text) == IMAGES
+    for bad in (None, "", text.replace("egress=", "proxy="), text + ",neo4j=" + IMAGES["neo4j"],
+                text.replace(IMAGES["graphiti"], "asofbench/graphiti")):
+        with pytest.raises(ingest.Refused, match="ASOFBENCH_IMAGE_IDS"):
+            ingest.parse_image_ids(bad)
+
+
+def record_of(elapsed: list[float | None]) -> dict:
+    return {"arm": "CF", "stream": "cf.jsonl", "stream_sha256": "0" * 64,
+            "invocations": [{"images": IMAGES, "elapsed_s": value} for value in elapsed]}
+
+
+def test_summary_counts_calls_over_100k_input_tokens_and_names_every_model():
     episodes = [episode(1, kind="create")]
     log = [log_line(episodes[0], True, "u1")]
     lines = [usage_line("a", 100_000, 1), usage_line("a", 99_999, 1, created=1),
              usage_line("a", 90_000, 1, read=10_001), usage_line(None, 5, 1)]
-    summary = ingest.summarize(episodes, log, lines, arm="CF", graphiti_core="0.31.2")
+    summary = ingest.summarize(episodes, log, lines, record_of([12.5, None, 3.0]),
+                               graphiti_core="0.31.2")
     assert summary["calls_over_100k_input"] == 1
-    assert summary["calls"] == 4 and summary["arm"] == "CF"
+    assert (summary["calls"], summary["arm"], summary["model"]) == (4, "CF", "claude-haiku-5-5")
+    assert (summary["elapsed_s"], summary["invocations"]) == (15.5, 3)
+    lines.append(usage_line("a", 1, 1, model="claude-sonnet-5-5"))
+    summary = ingest.summarize(episodes, log, lines, record_of([1.0]), graphiti_core="0.31.2")
+    assert summary["model"] == ["claude-haiku-5-5", "claude-sonnet-5-5"]
+    assert ingest.summarize(episodes, [], [], record_of([1.0]),
+                            graphiti_core="0.31.2")["model"] is None
 
 
 def test_config_json_records_the_adapter_s_configuration_and_the_lock():
@@ -331,6 +543,7 @@ def test_config_json_records_the_adapter_s_configuration_and_the_lock():
     assert config["episodes"]["previous_episodes"]["count"] == adapter.EPISODE_WINDOW_LEN
     assert config["concurrency"]["semaphore_limit"] == adapter.SEMAPHORE_LIMIT
     assert config["cross_encoder"]["raises"] == adapter.NO_RERANKER
+    assert "plan" not in json.dumps(config)
     pins = {}
     lock = (GRAPHITI / "requirements.txt").read_text(encoding="utf-8")
     for match in re.finditer(r"^([A-Za-z0-9_.-]+)==([^ ;\\\n]+)(?: ;([^\\\n]*))?", lock, re.M):

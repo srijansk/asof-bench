@@ -6,15 +6,19 @@
 #     ASOFBENCH_RUN_INPUT=<a directory holding the run's input stream and no other stream> \
 #     ASOFBENCH_RUN_OUTPUT=<the run's output directory> \
 #     ASOFBENCH_ANTHROPIC_KEY_FILE=<the file that holds the API key> \
+#     ASOFBENCH_IMAGE_IDS=<graphiti=sha256:...,egress=sha256:...,embedder=sha256:...,neo4j=sha256:...> \
 #     docker compose -f systems/graphiti/compose.yaml -p asofbench-graphiti-<run> \
 #         run --rm graphiti ingest --stream /input/<file>.jsonl --arm H+ --out /output
 #
-# The three variables are absolute paths (compose reads a relative one from this file's directory)
-# and are needed by every compose command on this file, `down` included. The key reaches the
-# container only as the Docker secret /run/secrets/anthropic_api_key.
+# The first three variables are absolute paths (compose reads a relative one from this file's
+# directory) and are needed by every compose command on this file, `down` included. The key
+# reaches the container only as the Docker secret /run/secrets/anthropic_api_key. The image IDs,
+# which README.md says how to read, are recorded in the run's outputs; ingest refuses to start
+# without them.
 #
 # Each service has a memory limit, and each is the first that the kernel stops if the machine
-# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else.
+# runs short of memory (oom_score_adj), so that a shortage stops this run and nothing else. Neo4j
+# restarts when it stops; the ingestion it interrupts stops with exit status 2, to be resumed.
 name: asofbench-graphiti
 
 services:
@@ -57,6 +61,7 @@ services:
       - inner
     mem_limit: 1g
     oom_score_adj: 1000
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7474/ || exit 1"]
       interval: 5s
@@ -73,6 +78,7 @@ services:
       HTTPS_PROXY: http://egress:3128
       NO_PROXY: neo4j,embedder,localhost,127.0.0.1
       GRAPHITI_TELEMETRY_ENABLED: "false"
+      ASOFBENCH_IMAGE_IDS: ${ASOFBENCH_IMAGE_IDS:-}
     volumes:
       - ${ASOFBENCH_RUN_INPUT:?}:/input:ro
       - ${ASOFBENCH_RUN_OUTPUT:?}:/output

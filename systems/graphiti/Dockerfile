@@ -44,5 +44,11 @@ USER 10001:10001
 # config.json records and that Graphiti builds as the adapter configures it, so that an image
 # that builds is one that ingests as configured.
 RUN --network=none python -m graphiti.adapter --self-test
+# The self-test imports the adapter only. The `ingest` command imports more, the shared run.py
+# among it. An image that lacked a file that ingest imports would build and fail only when its
+# container first ingested, and the tests that run in the image read the files they are given,
+# not the image's own. So the build imports ingest as the command does, with no network, and
+# fails here instead.
+RUN --network=none python -c "import graphiti.ingest"
 
 CMD ["ingest", "--help"]

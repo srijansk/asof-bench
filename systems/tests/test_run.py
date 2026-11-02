@@ -2,9 +2,9 @@
 directory's lock and the SIGTERM that cancels an invocation, run.json's invocation records and
 their atomic writes, JSON lines, the image IDs, the wait for the services and the network check,
 the classification of infrastructure errors, the stop, and the key check, the error text, the
-crash report, the hash of a file and the atomic write of any text. What each piece does with
-Graphiti's own values is checked in test_ingest_resume.py and test_graphiti_wiring.py. Standard
-library only."""
+crash report, the hash of a file and the atomic write of any text. What each piece does with a
+system's own values is checked in that system's wiring tests: Graphiti's in
+test_graphiti_wiring.py, the reader's in test_reader_wiring.py. Standard library only."""
 
 from __future__ import annotations
 

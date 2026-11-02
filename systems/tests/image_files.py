@@ -69,8 +69,9 @@ def shared_files_imported_by(path: Path, package: Path) -> set[str]:
 
 def shared_files_needed(entries: list[Path], package: Path) -> set[str]:
     """The files of the shared package that the modules at ``entries`` import, and those that
-    those import in turn, with the package's ``__init__.py``."""
-    needed, pending = {"__init__.py"}, list(entries)
+    those import in turn. The package's ``__init__.py`` is always one of them, since importing
+    any of its modules runs it first, and it is read for imports like any other shared file."""
+    needed, pending = {"__init__.py"}, [package / "__init__.py", *entries]
     while pending:
         for name in shared_files_imported_by(pending.pop(), package) - needed:
             needed.add(name)

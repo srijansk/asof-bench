@@ -9,8 +9,12 @@ CI runs them with the SDK and httpx that the reader image's lock pins:
 
 and they run inside the reader image, with no network at all:
 
-    docker run --rm --network none -v "$PWD/systems:/systems:ro" asofbench/reader \\
-        python -m pytest -p no:cacheprovider /systems/tests
+    docker run --rm --network none -v "$PWD/systems:/checkout/systems:ro" asofbench/reader \\
+        python -m pytest -p no:cacheprovider /checkout/systems/tests
+
+(systems/ is mounted below /checkout and not at the root: the configuration tests check that no
+configuration names the directory that holds systems/, which is "/" if it is mounted at the root,
+a string every text holds, and "/repo" if it is mounted there, which grep at D's names.)
 
 Every request goes to an httpx MockTransport and the key is a made-up one, so no test reaches the
 API or holds a real key.
@@ -242,6 +246,8 @@ def test_an_infrastructure_error_is_raised_for_the_run_to_stop_on(environment, k
     # unavailable or overloaded, or unreachable. The first-party async client raises its
     # InternalServerError for every 5xx, 503, 504 and 529 included: anthropic 0.78.0's has no
     # branch for 529, and the separate 503 and 504 classes are its Bedrock and Vertex clients'.
+    # A later release, such as the Graphiti image's 0.111.0, raises OverloadedError for a 529,
+    # a class of its own that the shared table names too.
     answers = [(401, error_body("authentication_error")), (403, error_body("permission_error")),
                (429, error_body("rate_limit_error")), (500, error_body("api_error")),
                (503, error_body("api_error")), (504, error_body("api_error")),
@@ -251,7 +257,11 @@ def test_an_infrastructure_error_is_raised_for_the_run_to_stop_on(environment, k
             call(key_file, Recorder(reply))
         assert run.infrastructure_error(caught.value, run.INFRASTRUCTURE) is not None, reply
         if isinstance(reply, tuple) and reply[0] >= 500:
-            assert isinstance(caught.value, anthropic.InternalServerError), reply
+            server_errors = (anthropic.InternalServerError,)
+            if reply[0] == 529:
+                server_errors += (getattr(anthropic, "OverloadedError",
+                                          anthropic.InternalServerError),)
+            assert isinstance(caught.value, server_errors), reply
         assert KEY not in str(caught.value)
 
 
